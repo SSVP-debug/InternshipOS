@@ -29,7 +29,10 @@ done
 echo "== Applying local auth shim (post-migration grants) =="
 $PSQL_RUN -v ON_ERROR_STOP=1 -d "$DB_NAME" -f "$ROOT_DIR/tests/local_auth_shim_grants.sql"
 
-echo "== Running RLS/ownership test suite =="
+echo "== Running RLS/ownership test suite (Day 1: candidate, personal_info, consent_record) =="
 $PSQL_RUN -v ON_ERROR_STOP=1 -d "$DB_NAME" -f "$ROOT_DIR/tests/rls/test_ownership_and_access.sql"
+
+echo "== Running RLS/ownership test suite (Day 2: education) =="
+$PSQL_RUN -v ON_ERROR_STOP=1 -d "$DB_NAME" -f "$ROOT_DIR/tests/rls/test_education_ownership.sql"
 
 echo "== ALL TESTS PASSED =="

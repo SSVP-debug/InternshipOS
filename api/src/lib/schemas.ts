@@ -35,3 +35,49 @@ export const ConsentRequestSchema = z.object({
   ]),
 });
 export type ConsentRequest = z.infer<typeof ConsentRequestSchema>;
+
+// ── Education (Day 2) ───────────────────────────────────────────────────
+// Mirrors the check constraints in 0007_education.sql — validated at the
+// API boundary too, same "fail fast with a clear message" pattern used for
+// personal_info. The .refine() calls duplicate the DB's temporal + GPA
+// constraints deliberately (belt-and-braces, not a replacement for them).
+
+const dateString = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "expected YYYY-MM-DD");
+
+export const EducationRequestSchema = z
+  .object({
+    institution_name: z.string().min(1),
+    institution_country: z.string().min(1),
+    degree_type: z.enum(["associate", "bachelor", "master", "phd", "bootcamp", "other"]),
+    major: z.string().min(1),
+    minor: z.string().optional(),
+    gpa_value: z.number().nonnegative().optional(),
+    gpa_scale: z.number().positive().optional(),
+    start_date: dateString,
+    expected_graduation_date: dateString.optional(),
+    actual_graduation_date: dateString.optional(),
+    enrollment_status: z.enum(["current", "graduated", "on_leave", "transferred", "withdrawn"]),
+    is_primary: z.boolean().optional().default(false),
+  })
+  .refine((data) => data.gpa_value === undefined || data.gpa_scale !== undefined, {
+    message: "gpa_scale is required whenever gpa_value is provided",
+    path: ["gpa_scale"],
+  })
+  .refine(
+    (data) => data.gpa_value === undefined || data.gpa_scale === undefined || data.gpa_value <= data.gpa_scale,
+    { message: "gpa_value cannot exceed gpa_scale", path: ["gpa_value"] }
+  )
+  .refine(
+    (data) =>
+      data.expected_graduation_date === undefined ||
+      data.expected_graduation_date >= data.start_date,
+    { message: "expected_graduation_date must be on or after start_date", path: ["expected_graduation_date"] }
+  )
+  .refine(
+    (data) =>
+      data.actual_graduation_date === undefined || data.actual_graduation_date >= data.start_date,
+    { message: "actual_graduation_date must be on or after start_date", path: ["actual_graduation_date"] }
+  );
+export type EducationRequest = z.infer<typeof EducationRequestSchema>;
+
+export const UuidParamSchema = z.string().uuid();
