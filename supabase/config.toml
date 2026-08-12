@@ -1,0 +1,9 @@
+# Minimal Supabase CLI config for Phase 0.
+# Used only to run/push migrations via `supabase db push` or
+# `supabase migration up` against your linked project — Day 1 does not
+# require the full local Supabase stack (Docker) to run.
+
+project_id = "internshipos"
+
+[db]
+port = 54322
