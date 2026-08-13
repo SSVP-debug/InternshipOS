@@ -26,11 +26,14 @@ grant select, insert, update, delete on public.experience to authenticated;
 -- Day 2: Achievement entity grants (multi-row, same pattern as experience).
 grant select, insert, update, delete on public.achievement to authenticated;
 
+-- Day 2: Certification entity grants (multi-row, same pattern as achievement).
+grant select, insert, update, delete on public.certification to authenticated;
+
 -- anon gets nothing in Phase 0 — no unauthenticated read/write surface yet.
 
 -- service_role bypasses RLS via the bypassrls role attribute (set in
 -- local_auth_shim.sql) and is the only role permitted to act across
 -- candidates — used exclusively by trusted backend code (e.g. the signup
 -- endpoint's post-provisioning step), never exposed to a client.
-grant all on public.candidate, public.personal_info, public.consent_record, public.education, public.work_authorization, public.skill, public.project, public.experience, public.achievement
+grant all on public.candidate, public.personal_info, public.consent_record, public.education, public.work_authorization, public.skill, public.project, public.experience, public.achievement, public.certification
   to service_role;

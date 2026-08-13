@@ -188,3 +188,23 @@ export const AchievementRequestSchema = z.object({
   verification_url: z.string().url().optional(),
 });
 export type AchievementRequest = z.infer<typeof AchievementRequestSchema>;
+
+// ── Certification (Day 2) ────────────────────────────────────────────────
+// Mirrors 0013_certification.sql exactly. verification_url is a plain
+// self-attested link — no credibility/ranking/score/verification-status
+// field is added, matching the migration's discipline.
+
+export const CertificationRequestSchema = z
+  .object({
+    name: z.string().trim().min(1),
+    issuer: z.string().trim().min(1),
+    issue_date: dateString,
+    expiry_date: dateString.optional(),
+    credential_id: z.string().optional(),
+    verification_url: z.string().url().optional(),
+  })
+  .refine((data) => data.expiry_date === undefined || data.expiry_date >= data.issue_date, {
+    message: "expiry_date must be on or after issue_date",
+    path: ["expiry_date"],
+  });
+export type CertificationRequest = z.infer<typeof CertificationRequestSchema>;
