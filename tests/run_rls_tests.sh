@@ -35,4 +35,7 @@ $PSQL_RUN -v ON_ERROR_STOP=1 -d "$DB_NAME" -f "$ROOT_DIR/tests/rls/test_ownershi
 echo "== Running RLS/ownership test suite (Day 2: education) =="
 $PSQL_RUN -v ON_ERROR_STOP=1 -d "$DB_NAME" -f "$ROOT_DIR/tests/rls/test_education_ownership.sql"
 
+echo "== Running RLS/ownership test suite (Day 2: work_authorization) =="
+$PSQL_RUN -v ON_ERROR_STOP=1 -d "$DB_NAME" -f "$ROOT_DIR/tests/rls/test_work_authorization_ownership.sql"
+
 echo "== ALL TESTS PASSED =="

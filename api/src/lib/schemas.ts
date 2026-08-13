@@ -81,3 +81,27 @@ export const EducationRequestSchema = z
 export type EducationRequest = z.infer<typeof EducationRequestSchema>;
 
 export const UuidParamSchema = z.string().uuid();
+
+// ── WorkAuthorization (Day 2) ───────────────────────────────────────────
+// Mirrors the check constraint + NOT NULL fields in 0008_work_authorization.sql.
+// requires_sponsorship is required (not defaulted) — it must be stored
+// explicitly per the task requirements, never inferred from `status`.
+
+export const WorkAuthorizationRequestSchema = z.object({
+  citizenship_country: z.string().min(1),
+  status: z.enum([
+    "us_citizen",
+    "permanent_resident",
+    "f1_opt",
+    "f1_cpt",
+    "stem_opt_eligible",
+    "h1b",
+    "other_visa",
+    "needs_sponsorship",
+    "not_applicable_non_us",
+  ]),
+  requires_sponsorship: z.boolean(),
+  work_auth_expiry_date: dateString.optional(),
+  notes: z.string().optional(),
+});
+export type WorkAuthorizationRequest = z.infer<typeof WorkAuthorizationRequestSchema>;
