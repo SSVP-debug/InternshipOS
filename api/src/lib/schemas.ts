@@ -147,3 +147,31 @@ export const ProjectRequestSchema = z
     path: ["end_date"],
   });
 export type ProjectRequest = z.infer<typeof ProjectRequestSchema>;
+
+// ── Experience (Day 2) ───────────────────────────────────────────────────
+// Mirrors 0011_experience.sql exactly. description_raw is the student's own
+// draft (self-attested tier) — no verification/credibility field exists
+// here, matching the migration's discipline. Temporal rules mirror
+// Project's is_ongoing/end_date pattern: is_current = true cannot coexist
+// with an end_date, and end_date (if present) must be >= start_date.
+
+export const ExperienceRequestSchema = z
+  .object({
+    organization: z.string().trim().min(1),
+    title: z.string().trim().min(1),
+    employment_type: z.enum(["internship", "part_time", "full_time", "research", "volunteer"]),
+    start_date: dateString,
+    end_date: dateString.optional(),
+    is_current: z.boolean().optional().default(false),
+    location: z.string().optional(),
+    description_raw: z.string().trim().min(1),
+  })
+  .refine((data) => data.end_date === undefined || data.end_date >= data.start_date, {
+    message: "end_date must be on or after start_date",
+    path: ["end_date"],
+  })
+  .refine((data) => !data.is_current || data.end_date === undefined, {
+    message: "an experience marked is_current cannot also have an end_date",
+    path: ["end_date"],
+  });
+export type ExperienceRequest = z.infer<typeof ExperienceRequestSchema>;
