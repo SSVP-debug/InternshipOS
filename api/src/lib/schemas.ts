@@ -120,3 +120,30 @@ export const SkillRequestSchema = z.object({
   self_rating: z.enum(["exposed", "proficient", "advanced"]).optional(),
 });
 export type SkillRequest = z.infer<typeof SkillRequestSchema>;
+
+// ── Project (Day 2) ──────────────────────────────────────────────────────
+// Mirrors 0010_project.sql exactly. No verification/evidence field exists
+// here by design — project facts stay self-attested and structural in
+// Phase 0; nothing about a project is ever auto-marked verified.
+
+export const ProjectRequestSchema = z
+  .object({
+    title: z.string().trim().min(1),
+    description: z.string().trim().min(1),
+    role: z.string().optional(),
+    team_size: z.number().int().positive().optional(),
+    start_date: dateString.optional(),
+    end_date: dateString.optional(),
+    is_ongoing: z.boolean().optional().default(false),
+    tech_stack: z.array(z.string().trim().min(1)).optional().default([]),
+    external_url: z.string().url().optional(),
+  })
+  .refine(
+    (data) => data.end_date === undefined || data.start_date === undefined || data.end_date >= data.start_date,
+    { message: "end_date must be on or after start_date", path: ["end_date"] }
+  )
+  .refine((data) => !data.is_ongoing || data.end_date === undefined, {
+    message: "a project marked is_ongoing cannot also have an end_date",
+    path: ["end_date"],
+  });
+export type ProjectRequest = z.infer<typeof ProjectRequestSchema>;

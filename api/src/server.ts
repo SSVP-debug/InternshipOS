@@ -4,8 +4,9 @@
 //   Day 2: GET/GET-one/POST/PUT/DELETE /education (authenticated) — Education entity
 //          GET/POST/PUT /work-authorization (authenticated) — WorkAuthorization entity
 //          GET/GET-one/POST/PUT/DELETE /skills (authenticated) — Skill entity
-// Nothing else from Day 2+ (Projects, Experience, Achievements,
-// Certifications, evidence, claims, matching, AI, etc.) is wired in here.
+//          GET/GET-one/POST/PUT/DELETE /projects (authenticated) — Project entity
+// Nothing else from Day 2+ (Experience, Achievements, Certifications,
+// evidence, claims, matching, AI, resumes, applications, etc.) is wired in here.
 
 import express from "express";
 import { loadEnv } from "./lib/env.js";
@@ -16,6 +17,7 @@ import { consentRouter } from "./routes/consent.js";
 import { educationRouter } from "./routes/education.js";
 import { workAuthorizationRouter } from "./routes/work-authorization.js";
 import { skillRouter } from "./routes/skill.js";
+import { projectRouter } from "./routes/project.js";
 
 const env = loadEnv();
 const app = express();
@@ -29,6 +31,7 @@ app.use(requireAuth(env), consentRouter(env));
 app.use(requireAuth(env), educationRouter());
 app.use(requireAuth(env), workAuthorizationRouter());
 app.use(requireAuth(env), skillRouter());
+app.use(requireAuth(env), projectRouter());
 
 app.listen(env.PORT, () => {
   console.log(`InternshipOS API listening on :${env.PORT}`);
