@@ -175,3 +175,16 @@ export const ExperienceRequestSchema = z
     path: ["end_date"],
   });
 export type ExperienceRequest = z.infer<typeof ExperienceRequestSchema>;
+
+// ── Achievement (Day 2) ──────────────────────────────────────────────────
+// Mirrors 0012_achievement.sql exactly. verification_url is a plain
+// self-attested link — no verification/credibility field is invented here.
+
+export const AchievementRequestSchema = z.object({
+  title: z.string().trim().min(1),
+  issuing_body: z.string().optional(),
+  date_awarded: dateString,
+  rank_or_result: z.string().optional(),
+  verification_url: z.string().url().optional(),
+});
+export type AchievementRequest = z.infer<typeof AchievementRequestSchema>;
