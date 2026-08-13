@@ -105,3 +105,18 @@ export const WorkAuthorizationRequestSchema = z.object({
   notes: z.string().optional(),
 });
 export type WorkAuthorizationRequest = z.infer<typeof WorkAuthorizationRequestSchema>;
+
+// ── Skill (Day 2) ────────────────────────────────────────────────────────
+// Mirrors 0009_skill.sql exactly. evidence_backed is deliberately absent
+// from this schema — it's a computed field (per the approved architecture)
+// with nothing to compute from until the Claim entity exists, so it is not
+// API-writable in Phase 0; the DB default (false) always applies.
+// self_rating is kept per the approved schema but is informational only —
+// not consumed by any matching/scoring logic in Phase 0.
+
+export const SkillRequestSchema = z.object({
+  name: z.string().trim().min(1),
+  category: z.enum(["language", "framework", "tool", "domain", "soft_skill"]),
+  self_rating: z.enum(["exposed", "proficient", "advanced"]).optional(),
+});
+export type SkillRequest = z.infer<typeof SkillRequestSchema>;

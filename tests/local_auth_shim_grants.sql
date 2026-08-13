@@ -14,11 +14,14 @@ grant select, insert, update, delete on public.education to authenticated;
 -- no delete grant, matching the precedent set there).
 grant select, insert, update on public.work_authorization to authenticated;
 
+-- Day 2: Skill entity grants (multi-row, same pattern as education).
+grant select, insert, update, delete on public.skill to authenticated;
+
 -- anon gets nothing in Phase 0 — no unauthenticated read/write surface yet.
 
 -- service_role bypasses RLS via the bypassrls role attribute (set in
 -- local_auth_shim.sql) and is the only role permitted to act across
 -- candidates — used exclusively by trusted backend code (e.g. the signup
 -- endpoint's post-provisioning step), never exposed to a client.
-grant all on public.candidate, public.personal_info, public.consent_record, public.education, public.work_authorization
+grant all on public.candidate, public.personal_info, public.consent_record, public.education, public.work_authorization, public.skill
   to service_role;
