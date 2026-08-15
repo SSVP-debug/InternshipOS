@@ -3,14 +3,18 @@
 # Rebuilds a scratch local database, applies all migrations, and runs the
 # Day 1 RLS/ownership test suite. Exits non-zero on any failure.
 #
-# Requires a local Postgres superuser session (adjust PSQL_RUN if your local
-# setup differs from `sudo -u postgres psql`). This never touches your real
+# Connects to the local Supabase CLI's Docker Postgres container over TCP
+# (127.0.0.1:54322, standard `supabase start` port from supabase/config.toml).
+# Override PSQL_RUN / PGPASSWORD via env vars if your local setup differs
+# (e.g. `supabase status` will show your actual DB URL and password if you
+# changed them from the CLI defaults). This never touches your real
 # Supabase project — it's a disposable local database.
 
 set -euo pipefail
 
 DB_NAME="${DB_NAME:-internshipos_test}"
-PSQL_RUN="${PSQL_RUN:-sudo -u postgres psql}"
+PSQL_RUN="${PSQL_RUN:-psql -h 127.0.0.1 -p 54322 -U postgres}"
+export PGPASSWORD="${PGPASSWORD:-postgres}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 echo "== Rebuilding $DB_NAME =="

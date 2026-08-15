@@ -108,6 +108,11 @@ begin
 end $$;
 
 \echo '--- Test 4: candidate CANNOT UPDATE personal_info after revoking data_processing consent ---'
+-- Note: this UPDATE passes the USING clause (the candidate owns the row)
+-- but fails WITH CHECK (no active consent on the post-update row), which
+-- is a distinct RLS failure mode from Test 1/2's blocked INSERT — Postgres
+-- raises "new row violates row-level security policy" here rather than
+-- silently affecting 0 rows, so the update must be wrapped to catch it.
 do $$
 declare v_uid uuid; v_cand uuid; v_last_name text;
 begin
@@ -120,7 +125,11 @@ begin
   update public.consent_record set revoked_at = now()
     where candidate_id = v_cand and consent_type = 'data_processing' and revoked_at is null;
 
-  update public.personal_info set legal_last_name = 'ShouldNotApply' where candidate_id = v_cand;
+  begin
+    update public.personal_info set legal_last_name = 'ShouldNotApply' where candidate_id = v_cand;
+  exception when others then
+    null; -- expected: RLS WITH CHECK rejects the update
+  end;
   reset role;
 
   select legal_last_name into v_last_name from public.personal_info where candidate_id = v_cand;

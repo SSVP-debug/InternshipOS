@@ -182,6 +182,11 @@ begin
 end $$;
 
 \echo '--- Test 7: candidate can INSERT and later re-read their own consent_record ---'
+-- Asserts on the specific row this test inserts (version = 'v1.0'), not a
+-- raw count of all consent_record rows for candidate A — Test 3 already
+-- leaves one revoked data_processing consent row behind for candidate A
+-- (granted temporarily to exercise the 0014 gate, then revoked), so a
+-- blanket count here would be fragile against that earlier fixture data.
 do $$
 declare v_uid uuid; v_cand uuid; v_count int;
 begin
@@ -191,7 +196,8 @@ begin
   set local role authenticated;
   insert into public.consent_record (candidate_id, consent_type, version)
   values (v_cand, 'data_processing', 'v1.0');
-  select count(*) into v_count from public.consent_record where candidate_id = v_cand;
+  select count(*) into v_count from public.consent_record
+    where candidate_id = v_cand and version = 'v1.0';
   reset role;
   if v_count != 1 then
     raise exception 'FAIL: user A could not record/read their own consent';
