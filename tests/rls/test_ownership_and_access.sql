@@ -68,7 +68,15 @@ begin
   raise notice 'PASS: user A cannot see user B''s candidate row';
 end $$;
 
-\echo '--- Test 3: candidate can INSERT their own personal_info ---'
+\echo '--- Test 3: candidate can INSERT their own personal_info (with active data_processing consent) ---'
+-- 0014_consent_gate_personal_info.sql now requires an active data_processing
+-- consent_record for personal_info INSERT/UPDATE. This test grants a
+-- temporary consent to exercise the "consent present -> insert allowed"
+-- path, then immediately revokes it so the account returns to an
+-- unconsented state for the tests that follow (Test 4's ownership check
+-- doesn't depend on consent state either way, since it fails on ownership
+-- grounds regardless). Test 7 grants a fresh, separate active consent for
+-- user A later in this suite.
 do $$
 declare v_uid uuid; v_cand uuid; v_count int;
 begin
@@ -76,14 +84,24 @@ begin
   select val into v_cand from test_ids where key = 'cand_a';
   perform set_config('request.jwt.claims', json_build_object('sub', v_uid)::text, true);
   set local role authenticated;
+
+  insert into public.consent_record (candidate_id, consent_type, version)
+  values (v_cand, 'data_processing', 'v1.0-temp');
+
   insert into public.personal_info (candidate_id, legal_first_name, legal_last_name, email, location_country)
   values (v_cand, 'Alice', 'Nguyen', 'alice@example.edu', 'US');
+
+  -- revoke immediately: this test only proves the gate lets a consented
+  -- write through, not that user A stays consented for the rest of the suite
+  update public.consent_record set revoked_at = now()
+    where candidate_id = v_cand and consent_type = 'data_processing' and revoked_at is null;
   reset role;
+
   select count(*) into v_count from public.personal_info where candidate_id = v_cand;
   if v_count != 1 then
-    raise exception 'FAIL: user A could not insert their own personal_info';
+    raise exception 'FAIL: user A could not insert their own personal_info with active consent';
   end if;
-  raise notice 'PASS: user A can insert their own personal_info';
+  raise notice 'PASS: user A can insert their own personal_info with active data_processing consent';
 end $$;
 
 \echo '--- Test 4: candidate CANNOT INSERT personal_info for someone else''s candidate_id ---'
@@ -121,11 +139,18 @@ begin
   select val into v_uid_b from test_ids where key = 'user_b';
   select val into v_cand_b from test_ids where key = 'cand_b';
 
-  -- user B inserts their own personal_info first
+  -- user B needs an active data_processing consent to insert personal_info
+  -- under 0014's gate; grant, insert, then revoke (this test isn't about
+  -- consent state, just cross-candidate SELECT, so leave user B unconsented
+  -- afterward same as before this migration existed).
   perform set_config('request.jwt.claims', json_build_object('sub', v_uid_b)::text, true);
   set local role authenticated;
+  insert into public.consent_record (candidate_id, consent_type, version)
+  values (v_cand_b, 'data_processing', 'v1.0-temp');
   insert into public.personal_info (candidate_id, legal_first_name, legal_last_name, email, location_country)
   values (v_cand_b, 'Bob', 'Martinez', 'bob@example.edu', 'US');
+  update public.consent_record set revoked_at = now()
+    where candidate_id = v_cand_b and consent_type = 'data_processing' and revoked_at is null;
   reset role;
 
   -- user A tries to read it
