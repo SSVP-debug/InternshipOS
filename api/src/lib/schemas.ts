@@ -208,3 +208,56 @@ export const CertificationRequestSchema = z
     path: ["expiry_date"],
   });
 export type CertificationRequest = z.infer<typeof CertificationRequestSchema>;
+
+// ── EvidenceSource (Day 3) ───────────────────────────────────────────────
+// Mirrors 0015_evidence_source.sql exactly. owner_verified is never
+// API-writable — it is set only by the GitHub OAuth verification flow,
+// never by a self-upload, same treatment as skill.evidence_backed.
+
+export const EvidenceSourceRequestSchema = z
+  .object({
+    source_type: z.enum(["document_upload", "github_repository"]),
+    title: z.string().trim().min(1),
+    file_ref: z.string().min(1).optional(),
+    external_url: z.string().url().optional(),
+  })
+  .refine(
+    (data) =>
+      data.source_type === "document_upload"
+        ? data.file_ref !== undefined && data.external_url === undefined
+        : data.file_ref === undefined && data.external_url !== undefined,
+    {
+      message:
+        "document_upload requires file_ref (and no external_url); github_repository requires external_url (and no file_ref)",
+      path: ["source_type"],
+    }
+  );
+export type EvidenceSourceRequest = z.infer<typeof EvidenceSourceRequestSchema>;
+
+// ── Claim (Day 4) ────────────────────────────────────────────────────────
+// Mirrors 0016_claim.sql. `status` is intentionally NOT part of the create/
+// update body schema — status changes go through a dedicated transition
+// endpoint (PATCH /claims/:id/status), not a general-purpose field update,
+// so the ClaimStatus state machine has exactly one entry point at the API
+// layer, mirroring the single DB trigger that enforces it.
+
+export const ClaimRequestSchema = z.object({
+  subject_entity_type: z.enum([
+    "education",
+    "work_authorization",
+    "skill",
+    "project",
+    "experience",
+    "achievement",
+    "certification",
+  ]),
+  subject_entity_id: z.string().uuid(),
+  claim_text: z.string().trim().min(1),
+  evidence_source_id: z.string().uuid().optional(),
+});
+export type ClaimRequest = z.infer<typeof ClaimRequestSchema>;
+
+export const ClaimStatusTransitionSchema = z.object({
+  status: z.enum(["CONFIRMED", "DISPUTED", "SUPERSEDED", "REVOKED"]),
+});
+export type ClaimStatusTransition = z.infer<typeof ClaimStatusTransitionSchema>;

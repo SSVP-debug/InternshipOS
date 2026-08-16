@@ -8,7 +8,10 @@
 //          GET/GET-one/POST/PUT/DELETE /experiences (authenticated) — Experience entity
 //          GET/GET-one/POST/PUT/DELETE /achievements (authenticated) — Achievement entity
 //          GET/GET-one/POST/PUT/DELETE /certifications (authenticated) — Certification entity
-// Nothing else from Day 2+ (evidence, claims, matching, AI, resumes,
+//   Day 3: GET/GET-one/POST/PUT/DELETE /evidence-sources (authenticated) — EvidenceSource entity
+//   Day 4: GET/GET-one/POST/PUT /claims, PATCH /claims/:id/status (authenticated)
+//          — Claim entity. No DELETE route: claims are never deleted.
+// Nothing else from Day 5+ (Truth Center, matching, AI, resumes,
 // applications, etc.) is wired in here.
 
 import express from "express";
@@ -24,6 +27,8 @@ import { projectRouter } from "./routes/project.js";
 import { experienceRouter } from "./routes/experience.js";
 import { achievementRouter } from "./routes/achievement.js";
 import { certificationRouter } from "./routes/certification.js";
+import { evidenceSourceRouter } from "./routes/evidence-source.js";
+import { claimRouter } from "./routes/claim.js";
 
 const env = loadEnv();
 const app = express();
@@ -41,6 +46,8 @@ app.use(requireAuth(env), projectRouter());
 app.use(requireAuth(env), experienceRouter());
 app.use(requireAuth(env), achievementRouter());
 app.use(requireAuth(env), certificationRouter());
+app.use(requireAuth(env), evidenceSourceRouter());
+app.use(requireAuth(env), claimRouter());
 
 app.listen(env.PORT, () => {
   console.log(`InternshipOS API listening on :${env.PORT}`);
