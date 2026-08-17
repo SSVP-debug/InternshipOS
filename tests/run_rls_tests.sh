@@ -60,4 +60,13 @@ $PSQL_RUN -v ON_ERROR_STOP=1 -d "$DB_NAME" -f "$ROOT_DIR/tests/rls/test_certific
 echo "== Running RLS/ownership test suite (Consent Gate: personal_info) =="
 $PSQL_RUN -v ON_ERROR_STOP=1 -d "$DB_NAME" -f "$ROOT_DIR/tests/rls/test_consent_gate.sql"
 
+echo "== Running RLS/ownership test suite (Day 3: evidence_source) =="
+$PSQL_RUN -v ON_ERROR_STOP=1 -d "$DB_NAME" -f "$ROOT_DIR/tests/rls/test_evidence_source_ownership.sql"
+
+echo "== Running RLS/ownership test suite (Day 4: claim) =="
+$PSQL_RUN -v ON_ERROR_STOP=1 -d "$DB_NAME" -f "$ROOT_DIR/tests/rls/test_claim_ownership.sql"
+
+echo "== Running RLS/ownership test suite (Day 5: account deletion cascade) =="
+$PSQL_RUN -v ON_ERROR_STOP=1 -d "$DB_NAME" -f "$ROOT_DIR/tests/rls/test_account_deletion_cascade.sql"
+
 echo "== ALL TESTS PASSED =="

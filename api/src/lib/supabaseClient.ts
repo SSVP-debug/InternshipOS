@@ -2,10 +2,11 @@
 //
 // Two, and only two, ways to talk to Supabase from this API:
 //
-// 1. adminClient(env) — service_role key, bypasses RLS. Used ONLY for the
-//    signup route's call to the Auth admin API (creating the auth.users
-//    row). Never used to read/write candidate/personal_info/consent_record
-//    tables directly — that would defeat the entire RLS boundary.
+// 1. adminClient(env) — service_role key, bypasses RLS. Used ONLY for two
+//    Auth admin API calls: signup's auth.users creation (POST /signup) and
+//    account deletion's auth.users removal (DELETE /account). Never used
+//    to read/write candidate/personal_info/consent_record tables directly
+//    — that would defeat the entire RLS boundary.
 //
 // 2. userScopedClient(env, accessToken) — anon key + the requesting user's
 //    own JWT attached as the Authorization header. Every candidate-data

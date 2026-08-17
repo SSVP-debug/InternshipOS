@@ -11,7 +11,9 @@
 //   Day 3: GET/GET-one/POST/PUT/DELETE /evidence-sources (authenticated) — EvidenceSource entity
 //   Day 4: GET/GET-one/POST/PUT /claims, PATCH /claims/:id/status (authenticated)
 //          — Claim entity. No DELETE route: claims are never deleted.
-// Nothing else from Day 5+ (Truth Center, matching, AI, resumes,
+//   Day 5: GET /export (authenticated) — full JSON dump scoped to the caller
+//          DELETE /account (authenticated) — real cascading account deletion
+// Nothing else from Day 6+ (Truth Center, matching, AI, resumes,
 // applications, etc.) is wired in here.
 
 import express from "express";
@@ -29,6 +31,7 @@ import { achievementRouter } from "./routes/achievement.js";
 import { certificationRouter } from "./routes/certification.js";
 import { evidenceSourceRouter } from "./routes/evidence-source.js";
 import { claimRouter } from "./routes/claim.js";
+import { accountRouter } from "./routes/account.js";
 
 const env = loadEnv();
 const app = express();
@@ -48,6 +51,7 @@ app.use(requireAuth(env), achievementRouter());
 app.use(requireAuth(env), certificationRouter());
 app.use(requireAuth(env), evidenceSourceRouter());
 app.use(requireAuth(env), claimRouter());
+app.use(requireAuth(env), accountRouter(env));
 
 app.listen(env.PORT, () => {
   console.log(`InternshipOS API listening on :${env.PORT}`);

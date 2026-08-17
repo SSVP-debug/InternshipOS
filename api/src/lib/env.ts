@@ -8,10 +8,13 @@ import { z } from "zod";
 const EnvSchema = z.object({
   SUPABASE_URL: z.string().url(),
   SUPABASE_ANON_KEY: z.string().min(1),
-  // service_role key: full DB access, bypasses RLS. Used ONLY by the signup
-  // route's server-side auth-user creation call — never forwarded to a
-  // client, never used for any per-candidate read/write (those always go
-  // through a user-scoped client so RLS applies).
+  // service_role key: full DB access, bypasses RLS. Used only by two
+  // routes: signup's server-side auth-user creation (POST /signup) and
+  // account deletion's server-side auth-user removal (DELETE /account) —
+  // both are operations on auth.users itself, which the anon-key
+  // user-scoped client cannot perform. Never forwarded to a client, never
+  // used for any per-candidate read/write (those always go through a
+  // user-scoped client so RLS applies).
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
   PORT: z.coerce.number().int().positive().default(3000),
   CONSENT_POLICY_VERSION: z.string().default("v1.0"),
