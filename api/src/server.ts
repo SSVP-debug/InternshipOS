@@ -13,8 +13,12 @@
 //          — Claim entity. No DELETE route: claims are never deleted.
 //   Day 5: GET /export (authenticated) — full JSON dump scoped to the caller
 //          DELETE /account (authenticated) — real cascading account deletion
-// Nothing else from Day 6+ (Truth Center, matching, AI, resumes,
-// applications, etc.) is wired in here.
+//   Day 6: GET /truth-center (authenticated) — derived read model over
+//          Claim + EvidenceSource + the 7 candidate-fact tables. This is
+//          the last piece of the Phase 0 "Candidate Truth Layer" as
+//          originally scoped — nothing stored, no migration behind it.
+// Nothing else from Day 7+ (matching, AI, resumes, applications, etc.) is
+// wired in here.
 
 import express from "express";
 import { loadEnv } from "./lib/env.js";
@@ -32,6 +36,7 @@ import { certificationRouter } from "./routes/certification.js";
 import { evidenceSourceRouter } from "./routes/evidence-source.js";
 import { claimRouter } from "./routes/claim.js";
 import { accountRouter } from "./routes/account.js";
+import { truthCenterRouter } from "./routes/truth-center.js";
 
 const env = loadEnv();
 const app = express();
@@ -52,6 +57,7 @@ app.use(requireAuth(env), certificationRouter());
 app.use(requireAuth(env), evidenceSourceRouter());
 app.use(requireAuth(env), claimRouter());
 app.use(requireAuth(env), accountRouter(env));
+app.use(requireAuth(env), truthCenterRouter());
 
 app.listen(env.PORT, () => {
   console.log(`InternshipOS API listening on :${env.PORT}`);
