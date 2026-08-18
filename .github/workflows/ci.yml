@@ -1,0 +1,70 @@
+name: CI
+
+# Runs on every push and pull request. Zero cost: GitHub Actions is free
+# for this project (public repo = unlimited free minutes; private repo =
+# 2,000 free minutes/month, and this suite runs in well under a minute).
+# No external accounts, secrets, or services required — the RLS suite
+# runs against a disposable Postgres service container spun up inside the
+# job itself, never a real Supabase project.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  api-tests:
+    name: API tests + type-check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: api
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: api/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run vitest suite
+        run: npm test
+
+      - name: Type-check (tsc --noEmit)
+        run: npx tsc --noEmit
+
+  rls-tests:
+    name: RLS / ownership test suite
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install postgresql-client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      - name: Run full RLS/ownership test suite
+        env:
+          DB_NAME: internshipos_test
+          PSQL_RUN: "psql -h 127.0.0.1 -p 5432 -U postgres"
+          PGPASSWORD: postgres
+        run: bash tests/run_rls_tests.sh
