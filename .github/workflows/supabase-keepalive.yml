@@ -1,0 +1,48 @@
+name: Supabase Keepalive
+
+# Supabase's free tier pauses a project after 7 days with no database
+# activity. This runs a trivial read-only query every 3 days (well under
+# the 7-day window, with margin for a missed/delayed run) against the
+# PRODUCTION Supabase project to keep it active. $0 cost — GitHub
+# Actions scheduled workflows are free, and this job runs in seconds.
+#
+# Setup required (one-time, in the GitHub repo, not in code):
+#   Settings -> Secrets and variables -> Actions -> New repository secret
+#     SUPABASE_URL       = https://<your-prod-project-ref>.supabase.co
+#     SUPABASE_ANON_KEY   = <anon/public key from Supabase project settings>
+#
+# This intentionally uses the anon key against a public, unauthenticated
+# REST endpoint (PostgREST's root) rather than any table read — it does
+# not need RLS-bypassing privileges, and it never touches candidate data.
+
+on:
+  schedule:
+    - cron: "0 6 */3 * *" # every 3 days at 06:00 UTC
+  workflow_dispatch: {} # allow manual trigger for testing
+
+jobs:
+  ping-supabase:
+    name: Ping production Supabase project
+    runs-on: ubuntu-latest
+    steps:
+      - name: Hit PostgREST root endpoint
+        run: |
+          if [ -z "${{ secrets.SUPABASE_URL }}" ] || [ -z "${{ secrets.SUPABASE_ANON_KEY }}" ]; then
+            echo "::error::SUPABASE_URL or SUPABASE_ANON_KEY repo secret is not set. See workflow header comment for setup steps."
+            exit 1
+          fi
+
+          status=$(curl -s -o /dev/null -w "%{http_code}" \
+            "${{ secrets.SUPABASE_URL }}/rest/v1/" \
+            -H "apikey: ${{ secrets.SUPABASE_ANON_KEY }}")
+
+          echo "PostgREST root responded with HTTP $status"
+
+          # PostgREST root returns 200 (OpenAPI spec) when reachable.
+          # Any 2xx/4xx response means the project is awake and responding;
+          # only a connection failure (curl exit code, empty status) or 5xx
+          # indicates a real problem.
+          if [ -z "$status" ] || [ "$status" -ge 500 ]; then
+            echo "::error::Supabase project did not respond as expected (HTTP $status)."
+            exit 1
+          fi

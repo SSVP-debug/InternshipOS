@@ -1,11 +1,12 @@
 # InternshipOS — Progress
 
-Last updated: 2026-08-18 (Export/Deletion + Truth Center validated: 167/167
-API tests, `tsc --noEmit` clean, all RLS suites including the account-
-deletion cascade suite passing. Pushed to GitHub. **Phase 0 —
-"Candidate Truth Layer" as originally scoped — is complete.**)
+Last updated: 2026-08-18 (D-001 and D-002 sign-off resolved — see
+`docs/decisions-log.md`. Phase 0 remains complete and pushed. Phase B
+(Production Infrastructure) is now the active phase: CI pipeline built
+and green; hosting/production Supabase/domain decisions pending owner
+input — see "Immediate next steps" below.)
 
-## Overall: Phase 0 is 100% built and validated. Full-platform roadmap (Phase 0 + Matching + AI + Product) is ~25%.
+## Overall: Phase 0 is 100% built and validated. Phase B (infra) has begun. Full-platform roadmap (Phase 0 + Phase B + Matching + AI + Product) is ~30%.
 
 ```
 Candidate Facts    [██████████] 100%  (8/8 entities, validated)
@@ -13,6 +14,9 @@ Consent Gate       [██████████] 100%  (validated: 129 API te
 Evidence + Claim   [██████████] 100%  (validated: 11/11 RLS suites, all tests green, pushed)
 Export/Deletion    [██████████] 100%  (validated 2026-08-18: cascade suite green, pushed)
 Truth Center       [██████████] 100%  (validated 2026-08-18: 11/11 unit tests green, pushed)
+Phase B: CI        [██████████] 100%  (167 tests + tsc + 12 RLS suites run on every push, $0 cost)
+Phase B: Hosting    [██████████] 100%  (Render deployed, production Supabase created, free subdomain — done by you 2026-08-18)
+Phase B: Keepalive  [██████████] 100%  (workflow built 2026-08-18; needs SUPABASE_URL/SUPABASE_ANON_KEY repo secrets added by you)
 Matching           [░░░░░░░░░░]   0%  (not started, not scoped)
 AI Layer           [░░░░░░░░░░]   0%  (not started; LLM boundary serializer designed, not coded)
 Product Layer      [░░░░░░░░░░]   0%  (far future)
@@ -50,12 +54,12 @@ and Day 5 (account deletion cascade).
 
 ## Open items before Phase 0 is fully closed out (non-code)
 
-- [ ] **D-001 sign-off**: unverified GitHub-link trust tier — see
-      `docs/decisions-log.md`. Proposed default in place, awaiting your
-      approval.
-- [ ] **D-002 sign-off**: work_authorization singleton handling in Truth
-      Center — see `docs/decisions-log.md`. Proposed default in place,
-      awaiting your approval.
+- [x] **D-001 sign-off** (resolved 2026-08-18): unverified GitHub-link
+      evidence stays `tier_2_document`. See `docs/decisions-log.md` for
+      full rationale.
+- [x] **D-002 sign-off** (resolved 2026-08-18): work_authorization stays
+      special-cased in Truth Center's read logic, no schema change. See
+      `docs/decisions-log.md` for full rationale.
 - [ ] **Retention policy sign-off**: draft windows, consent copy, and
       reactivation policy proposed in `docs/retention-policy.md`. Nothing
       in this file is implemented in code — it's a policy decision that
@@ -97,22 +101,20 @@ completion is closer to 25%, not 100%.
 
 ## Immediate next steps, in order
 
-1. **Sign off on D-001, D-002, and the retention policy** — three short
-   checklists in `docs/decisions-log.md` and `docs/retention-policy.md`.
-   Nothing else in Phase 0 is blocked on code; these are the only
-   remaining open items, and they're decisions, not implementation.
-2. **Choose the next phase.** Per the architecture doc's own sequencing,
-   matching is next, but that's a genuinely new scoping exercise (job
-   ingestion, a matching engine) rather than a continuation of Phase 0.
-   Equally reasonable alternatives, in no particular order:
-   - Build the LLM data-boundary serializer now, before any AI feature
-     work starts, since the architecture doc treats it as a
-     safety-critical prerequisite rather than a nice-to-have.
-   - Build a minimal frontend so Phase 0 is actually usable by a real
-     student, not just API-complete.
-   - Stand up production infrastructure (real Supabase project, CI,
-     secrets management) so what's already built can go live.
-   - Scope the matching engine as its own fresh design pass.
-
-   This is a genuine decision point, not a default — worth a short
-   conversation before picking one.
+1. ~~Sign off on D-001 and D-002~~ — **done 2026-08-18.**
+2. **Priority chosen 2026-08-18: continue Phase B (production
+   infrastructure)**, since it's already in motion (CI is built and
+   green). Retention-policy sign-off and the LLM boundary serializer
+   remain explicitly deferred until Phase B is further along.
+3. **Phase B — hosting, production Supabase, and domain are done** (you
+   completed these directly on 2026-08-18). Keepalive job is now built
+   (`.github/workflows/supabase-keepalive.yml`) — **one manual step
+   required from you**: add `SUPABASE_URL` and `SUPABASE_ANON_KEY` as
+   GitHub repo secrets (Settings → Secrets and variables → Actions).
+   I can't do this step — it needs your Supabase project credentials.
+4. **One remaining Phase B question**: your GitHub repo path, to confirm
+   Render's auto-deploy-from-GitHub is correctly wired. See
+   `docs/phase-b-progress.md`.
+5. Retention policy (`docs/retention-policy.md`) and the LLM
+   data-boundary serializer remain open but are not currently being
+   worked — revisit once the repo-path/deploy question above is closed.
