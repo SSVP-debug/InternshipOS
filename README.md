@@ -1,10 +1,11 @@
-# InternshipOS — Phase 0 / Day 1
+# InternshipOS — Candidate Truth Layer (Phase 0)
 
-This is the first implementation slice of the Candidate Truth Layer, per
-`docs/candidate-truth-layer-phase0.md` (the approved architecture). Day 1
-scope only: Supabase/Postgres setup, auth, `candidate`, `personal_info`,
-`consent_record`, the PII/RLS access boundary, a minimal signup/profile
-flow, and tests for ownership + unauthorized access.
+The Candidate Truth Layer backend for InternshipOS, per
+`docs/candidate-truth-layer-phase0.md` (the approved architecture):
+Supabase/Postgres setup, auth, the full Phase 0 candidate-fact table set,
+the PII/RLS access boundary, the Claim lifecycle and Truth Center read
+model, account export/deletion, and tests for ownership + unauthorized
+access. See "Current scope" below for the precise boundary.
 
 ## Repository layout
 
@@ -15,14 +16,21 @@ supabase/
                           real Supabase project)
   config.toml
 api/
-  src/                 -- Express + supabase-js API (signup, profile, consent)
-  tests/               -- vitest unit tests (schema validation, auth middleware)
+  src/                 -- Express + supabase-js API (see src/server.ts for
+                          the full route list)
+  scripts/             -- operator-run scripts (production smoke test,
+                          orphan-claim integrity check) — never part of
+                          the request-serving path
+  tests/               -- vitest unit/integration tests (schema validation,
+                          middleware, app wiring)
 tests/
   local_auth_shim.sql        -- LOCAL TEST ONLY: replicates Supabase's
                                  auth schema/roles on a plain local Postgres
   local_auth_shim_grants.sql -- LOCAL TEST ONLY: table grants, applied after migrations
-  rls/test_ownership_and_access.sql -- the Day 1 RLS/ownership test suite
+  rls/                        -- the full RLS/ownership test suite, one file
+                                 per entity/concern
   run_rls_tests.sh           -- rebuilds a scratch DB and runs the suite
+
 docs/
   candidate-truth-layer-phase0.md -- the approved architecture (copied in for reference)
 ```
@@ -95,9 +103,22 @@ project):
 tests/run_rls_tests.sh
 ```
 
-## Day 1 scope boundary
+## Current scope
 
-This implements Day 1 of `docs/candidate-truth-layer-phase0.md` only.
-`Education`, `Skill`, `Project`, `GitHubRepository`, `Experience`,
-`Achievement`, `Certification`, `EvidenceSource`, `Claim`, the Truth Center,
-and everything from Day 2 onward are **not** implemented here.
+The Candidate Truth Layer's Phase 0 (Days 1–6, per
+`docs/candidate-truth-layer-phase0.md`) is implemented end to end:
+signup/auth, `personal_info`, `consent_record`, `Education`, `Work
+Authorization`, `Skill`, `Project`, `Experience`, `Achievement`,
+`Certification`, `EvidenceSource`, `Claim` (with the full `ClaimStatus`
+lifecycle), account export/deletion, and the Truth Center read model. See
+`src/server.ts`'s header comment for the exact route-by-route breakdown,
+and `docs/candidate-truth-layer-phase0.md` for the underlying
+architecture. GitHub OAuth verification, the ATS Adapter System, the
+Matching Layer, the AI/Generation Layer, and the Product Layer are not
+implemented here.
+
+## Production / operations
+
+See `docs/production-readiness.md` for environment variables, health
+checks (`/healthz`, `/readyz`), logging, rate limiting, CORS, the
+deployment model, and known gaps.

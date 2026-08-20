@@ -234,6 +234,19 @@ export const EvidenceSourceRequestSchema = z
   );
 export type EvidenceSourceRequest = z.infer<typeof EvidenceSourceRequestSchema>;
 
+// ── EvidenceSource Storage upload (Gate 1a) ─────────────────────────────
+// Body for POST /evidence-sources/upload-url — requests a signed upload
+// slot before an evidence_source row exists to attach an id to. content_
+// type is optional since the client may not always know it upfront; when
+// given, it's passed through to Supabase Storage's signed-upload call,
+// which is itself constrained by the bucket's allowed_mime_types.
+
+export const UploadUrlRequestSchema = z.object({
+  filename: z.string().trim().min(1),
+  content_type: z.string().optional(),
+});
+export type UploadUrlRequest = z.infer<typeof UploadUrlRequestSchema>;
+
 // ── Claim (Day 4) ────────────────────────────────────────────────────────
 // Mirrors 0016_claim.sql. `status` is intentionally NOT part of the create/
 // update body schema — status changes go through a dedicated transition

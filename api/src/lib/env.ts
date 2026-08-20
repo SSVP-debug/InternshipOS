@@ -18,6 +18,36 @@ const EnvSchema = z.object({
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
   PORT: z.coerce.number().int().positive().default(3000),
   CONSENT_POLICY_VERSION: z.string().default("v1.0"),
+  // "development" | "test" | "production" — never inferred from anything
+  // else. Used only to (a) choose log formatting (pretty vs JSON) and
+  // (b) decide whether missing ALLOWED_ORIGINS should be a hard failure.
+  // Defaulting to "development" is deliberate: it's the safest default to
+  // fail *open* on convenience and *closed* on anything security-relevant
+  // (CORS below still defaults to "no cross-origin access" regardless of
+  // NODE_ENV), so an operator who forgets to set NODE_ENV in production
+  // does not silently get production credentials treated as dev ones —
+  // there are no environment-specific credentials in this schema; every
+  // secret above is always required, in every environment, with no
+  // fallback value, so there is no "accidental prod-uses-dev-secret" path
+  // to begin with.
+  NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
+  // Comma-separated list of allowed browser origins for CORS, e.g.
+  // "https://app.internshipos.example,https://staging.internshipos.example".
+  // Deliberately opt-in and unset by default: with no value, the API
+  // still works for non-browser callers (curl, server-to-server, the
+  // smoke test) — Authorization-header requests from those never go
+  // through browser CORS preflight — but no browser page on any origin
+  // can call it with credentials. Set this explicitly for whatever
+  // origin(s) the actual frontend is served from.
+  ALLOWED_ORIGINS: z
+    .string()
+    .optional()
+    .transform((v) => (v ? v.split(",").map((o) => o.trim()).filter(Boolean) : [])),
+  // Sets the ceiling for POST /signup (the one unauthenticated,
+  // account-creation-capable route) to blunt automated signup/enumeration
+  // abuse. Requests per IP per RATE_LIMIT_WINDOW_MINUTES.
+  SIGNUP_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(10),
+  RATE_LIMIT_WINDOW_MINUTES: z.coerce.number().int().positive().default(15),
 });
 
 export type Env = z.infer<typeof EnvSchema>;

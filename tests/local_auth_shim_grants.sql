@@ -39,9 +39,17 @@ grant select, insert, update on public.claim to authenticated;
 
 -- anon gets nothing in Phase 0 — no unauthenticated read/write surface yet.
 
+-- Gate 1a: evidence Storage bucket grants. No delete-only/update grant on
+-- storage.objects beyond what's below — evidence documents are immutable
+-- once uploaded (0017_evidence_storage_bucket.sql), matching the RLS
+-- policies (no update policy exists there either).
+grant select, insert, delete on storage.objects to authenticated;
+grant select on storage.buckets to authenticated;
+
 -- service_role bypasses RLS via the bypassrls role attribute (set in
 -- local_auth_shim.sql) and is the only role permitted to act across
 -- candidates — used exclusively by trusted backend code (e.g. the signup
 -- endpoint's post-provisioning step), never exposed to a client.
 grant all on public.candidate, public.personal_info, public.consent_record, public.education, public.work_authorization, public.skill, public.project, public.experience, public.achievement, public.certification, public.evidence_source, public.claim
   to service_role;
+grant all on storage.objects, storage.buckets to service_role;

@@ -24,6 +24,9 @@ $PSQL_RUN -v ON_ERROR_STOP=1 -c "CREATE DATABASE ${DB_NAME};"
 echo "== Applying local auth shim (pre-migration half) =="
 $PSQL_RUN -v ON_ERROR_STOP=1 -d "$DB_NAME" -f "$ROOT_DIR/tests/local_auth_shim.sql"
 
+echo "== Applying local storage shim (Gate 1a: evidence Storage bucket) =="
+$PSQL_RUN -v ON_ERROR_STOP=1 -d "$DB_NAME" -f "$ROOT_DIR/tests/local_storage_shim.sql"
+
 echo "== Applying migrations =="
 for f in "$ROOT_DIR"/supabase/migrations/*.sql; do
   echo "  -> $f"
@@ -68,5 +71,8 @@ $PSQL_RUN -v ON_ERROR_STOP=1 -d "$DB_NAME" -f "$ROOT_DIR/tests/rls/test_claim_ow
 
 echo "== Running RLS/ownership test suite (Day 5: account deletion cascade) =="
 $PSQL_RUN -v ON_ERROR_STOP=1 -d "$DB_NAME" -f "$ROOT_DIR/tests/rls/test_account_deletion_cascade.sql"
+
+echo "== Running RLS/ownership test suite (Gate 1a: evidence Storage bucket) =="
+$PSQL_RUN -v ON_ERROR_STOP=1 -d "$DB_NAME" -f "$ROOT_DIR/tests/rls/test_evidence_storage_ownership.sql"
 
 echo "== ALL TESTS PASSED =="

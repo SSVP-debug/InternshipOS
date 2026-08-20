@@ -6,6 +6,13 @@ name: CI
 # No external accounts, secrets, or services required — the RLS suite
 # runs against a disposable Postgres service container spun up inside the
 # job itself, never a real Supabase project.
+#
+# api-tests also runs `npm run build` (a real tsc emit, not just
+# --noEmit) and `npm audit --audit-level=high` — the build step catches
+# anything --noEmit's project-reference/incremental caching might paper
+# over, and the audit step fails CI if a high/critical-severity
+# vulnerability appears in the dependency tree (the baseline as of this
+# workflow revision is 0 vulnerabilities — see docs/production-readiness.md).
 
 on:
   push:
@@ -38,6 +45,12 @@ jobs:
 
       - name: Type-check (tsc --noEmit)
         run: npx tsc --noEmit
+
+      - name: Build (tsc emit)
+        run: npm run build
+
+      - name: Dependency audit (fail on high/critical)
+        run: npm audit --audit-level=high
 
   rls-tests:
     name: RLS / ownership test suite

@@ -35,10 +35,16 @@
 //    exists, then wire it up." This is that placeholder, done exactly as
 //    instructed — not an oversight.
 //
-// 4. evidence_link for an uploaded document is the raw file_ref storage
-//    path, not a signed/public URL — no file upload or Storage-URL flow
-//    exists in this repo yet (same known gap noted in account.ts's
-//    deletion handler), so there's nothing to sign against yet.
+// 4. [Gate 1a, superseding the original version of this note] evidence_link
+//    for an uploaded document is now always null, never the raw file_ref
+//    storage path — a bare path isn't a usable link, and per the Gate 1
+//    decision, a signed URL is exposed only on demand via the dedicated
+//    GET /evidence-sources/:id/download-url endpoint, never embedded here
+//    (a Truth Center response listing every claim shouldn't also be
+//    silently minting a signed URL per document on every load). The entry
+//    now carries evidence_source_id instead, which is what a client calls
+//    that endpoint with. github_repository's evidence_link is unaffected —
+//    external_url was always a real, directly usable link.
 //
 // 5. All five ClaimStatus values are included, not just CONFIRMED/DRAFT.
 //    §2 explicitly wants SUPERSEDED/REVOKED visible ("this is what makes
@@ -129,7 +135,10 @@ function computeEvidenceSummary(evidence: EvidenceRow | undefined, trustTier: Tr
 function computeEvidenceLink(evidence: EvidenceRow | undefined): string | null {
   if (!evidence) return null;
   if (evidence.source_type === "github_repository") return evidence.external_url;
-  return evidence.file_ref;
+  // document_upload: no raw path exposure (Gate 1a decision #4) — the
+  // client uses the entry's evidence_source_id against
+  // GET /evidence-sources/:id/download-url to get a real, short-lived link.
+  return null;
 }
 
 export function truthCenterRouter(): Router {
@@ -237,6 +246,7 @@ export function truthCenterRouter(): Router {
         trust_tier: trustTier,
         trust_tier_label: TRUST_TIER_COPY[trustTier].label,
         trust_tier_explanation: TRUST_TIER_COPY[trustTier].explanation,
+        evidence_source_id: claim.evidence_source_id,
         evidence_summary: computeEvidenceSummary(evidence, trustTier),
         evidence_link: computeEvidenceLink(evidence),
         last_reviewed_at: claim.last_reviewed_at,

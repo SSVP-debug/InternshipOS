@@ -1,0 +1,31 @@
+# dependabot.yml
+# Weekly, low-noise dependency update PRs for the two dependency surfaces
+# in this repo: the api/ npm package and the GitHub Actions workflows
+# themselves. Grouped so a routine minor/patch bump wave doesn't open a
+# dozen individual PRs — major-version bumps stay ungrouped so they get
+# reviewed individually, since those are the ones likely to need the kind
+# of "check breaking changes / Node compatibility / test compatibility"
+# judgment call the engineering pass instructions call for, not an
+# auto-mergeable patch.
+
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/api"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    groups:
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+    commit-message:
+      prefix: "chore(deps)"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore(ci)"

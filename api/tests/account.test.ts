@@ -181,9 +181,45 @@ describe("GET /export", () => {
   });
 });
 
+// Gate 1a: DELETE /account now also queries evidence_source (to list
+// document_upload file_refs) and calls storage.from(bucket).remove(...)
+// before the admin deleteUser() call. This mock covers both, with
+// sensible defaults (no files) so tests that don't care about Storage
+// don't need to specify it.
+function makeDeleteAccountSupabaseMock(opts: {
+  userId?: string | null;
+  evidenceFiles?: { file_ref: string | null }[];
+  evidenceListError?: { message: string } | null;
+  removeMock?: ReturnType<typeof vi.fn>;
+}) {
+  const { userId = "auth-user-1", evidenceFiles = [], evidenceListError = null, removeMock = vi.fn(async () => ({ error: null })) } = opts;
+
+  return {
+    auth: {
+      getUser: async () =>
+        userId ? { data: { user: { id: userId } }, error: null } : { data: { user: null }, error: { message: "no session" } },
+    },
+    from(table: string) {
+      if (table === "evidence_source") {
+        return {
+          select: () => ({
+            eq: () => ({
+              not: async () => ({ data: evidenceListError ? null : evidenceFiles, error: evidenceListError }),
+            }),
+          }),
+        };
+      }
+      throw new Error(`unexpected table in DELETE /account mock: ${table}`);
+    },
+    storage: {
+      from: () => ({ remove: removeMock }),
+    },
+  };
+}
+
 describe("DELETE /account", () => {
   it("returns 401 when the caller's session cannot be resolved", async () => {
-    const supabase = { auth: { getUser: async () => ({ data: { user: null }, error: { message: "no session" } }) } };
+    const supabase = makeDeleteAccountSupabaseMock({ userId: null });
     const req = { supabase } as unknown as AuthedRequest;
     const res = makeRes();
 
@@ -193,9 +229,45 @@ describe("DELETE /account", () => {
     expect(deleteUserMock).not.toHaveBeenCalled();
   });
 
-  it("deletes the caller's own auth.users row and returns 204", async () => {
+  it("deletes the caller's own auth.users row and returns 204 (no evidence files to purge)", async () => {
     deleteUserMock.mockResolvedValue({ error: null });
-    const supabase = { auth: { getUser: async () => ({ data: { user: { id: "auth-user-1" } }, error: null }) } };
+    const removeMock = vi.fn(async () => ({ error: null }));
+    const supabase = makeDeleteAccountSupabaseMock({ evidenceFiles: [], removeMock });
+    const req = { supabase } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("delete", "/account"), req, res);
+
+    expect(deleteUserMock).toHaveBeenCalledWith("auth-user-1");
+    expect(res.status).toHaveBeenCalledWith(204);
+    // No file_refs -> remove() should never be called at all.
+    expect(removeMock).not.toHaveBeenCalled();
+  });
+
+  it("purges Storage-backed evidence files before deleting the account", async () => {
+    deleteUserMock.mockResolvedValue({ error: null });
+    const removeMock = vi.fn(async () => ({ error: null }));
+    const supabase = makeDeleteAccountSupabaseMock({
+      evidenceFiles: [{ file_ref: "cand-1/resume.pdf" }, { file_ref: "cand-1/transcript.pdf" }],
+      removeMock,
+    });
+    const req = { supabase } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("delete", "/account"), req, res);
+
+    expect(removeMock).toHaveBeenCalledWith(["cand-1/resume.pdf", "cand-1/transcript.pdf"]);
+    expect(deleteUserMock).toHaveBeenCalledWith("auth-user-1");
+    expect(res.status).toHaveBeenCalledWith(204);
+  });
+
+  it("still deletes the account (204) when Storage purge fails — best-effort, not blocking", async () => {
+    deleteUserMock.mockResolvedValue({ error: null });
+    const removeMock = vi.fn(async () => ({ error: { message: "Storage unavailable" } }));
+    const supabase = makeDeleteAccountSupabaseMock({
+      evidenceFiles: [{ file_ref: "cand-1/resume.pdf" }],
+      removeMock,
+    });
     const req = { supabase } as unknown as AuthedRequest;
     const res = makeRes();
 
@@ -205,9 +277,26 @@ describe("DELETE /account", () => {
     expect(res.status).toHaveBeenCalledWith(204);
   });
 
+  it("still deletes the account (204) when listing evidence files fails — best-effort, not blocking", async () => {
+    deleteUserMock.mockResolvedValue({ error: null });
+    const removeMock = vi.fn(async () => ({ error: null }));
+    const supabase = makeDeleteAccountSupabaseMock({
+      evidenceListError: { message: "connection reset" },
+      removeMock,
+    });
+    const req = { supabase } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("delete", "/account"), req, res);
+
+    expect(deleteUserMock).toHaveBeenCalledWith("auth-user-1");
+    expect(res.status).toHaveBeenCalledWith(204);
+    expect(removeMock).not.toHaveBeenCalled();
+  });
+
   it("returns 400 account_deletion_failed when the admin API call errors", async () => {
     deleteUserMock.mockResolvedValue({ error: { message: "admin API unavailable" } });
-    const supabase = { auth: { getUser: async () => ({ data: { user: { id: "auth-user-1" } }, error: null }) } };
+    const supabase = makeDeleteAccountSupabaseMock({});
     const req = { supabase } as unknown as AuthedRequest;
     const res = makeRes();
 
