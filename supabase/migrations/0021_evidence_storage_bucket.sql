@@ -1,4 +1,4 @@
--- 0017_evidence_storage_bucket.sql
+-- 0021_evidence_storage_bucket.sql
 -- Gate 1a — Storage backing for EvidenceSource.file_ref (document_upload).
 --
 -- Closes the gap flagged in 0015_evidence_source.sql / account.ts / truth-

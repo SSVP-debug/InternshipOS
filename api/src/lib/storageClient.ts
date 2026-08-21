@@ -1,6 +1,6 @@
 // storageClient.ts
 // Gate 1a — path/naming helpers for the evidence-documents Storage bucket
-// (see 0017_evidence_storage_bucket.sql). Deliberately just helpers, not a
+// (see 0021_evidence_storage_bucket.sql). Deliberately just helpers, not a
 // client factory — every Storage call in this API goes through the
 // caller's own req.supabase (userScopedClient), same as every table read/
 // write, so storage.objects RLS (not application code) enforces ownership.

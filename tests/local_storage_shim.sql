@@ -5,7 +5,7 @@
 --
 -- Same reasoning as local_auth_shim.sql: this recreates just enough of that
 -- surface, matching Supabase's real implementation, so that
--- 0017_evidence_storage_bucket.sql (written against the real Supabase
+-- 0021_evidence_storage_bucket.sql (written against the real Supabase
 -- storage contract) can be tested against a plain local Postgres instance —
 -- specifically the disposable postgres:16 container CI uses, which has no
 -- storage extension at all. Applied before migrations run, same as

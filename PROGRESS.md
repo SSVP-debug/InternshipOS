@@ -10,7 +10,7 @@ below.
 ## Gate 1a — Evidence Storage flow: DONE, fully validated this time
 
 ### What's in this handover
-1. **`0017_evidence_storage_bucket.sql`** (new migration) — private
+1. **`0021_evidence_storage_bucket.sql`** (new migration) — private
    `evidence-documents` bucket, RLS on `storage.objects` scoped by a
    candidate_id-prefixed path (`{candidate_id}/{random-uuid}-{filename}`).
    10 MB / PDF+DOC+DOCX+PNG+JPEG limits set at the bucket level — my
