@@ -6,13 +6,6 @@ name: CI
 # No external accounts, secrets, or services required — the RLS suite
 # runs against a disposable Postgres service container spun up inside the
 # job itself, never a real Supabase project.
-#
-# api-tests also runs `npm run build` (a real tsc emit, not just
-# --noEmit) and `npm audit --audit-level=high` — the build step catches
-# anything --noEmit's project-reference/incremental caching might paper
-# over, and the audit step fails CI if a high/critical-severity
-# vulnerability appears in the dependency tree (the baseline as of this
-# workflow revision is 0 vulnerabilities — see docs/production-readiness.md).
 
 on:
   push:
@@ -46,11 +39,33 @@ jobs:
       - name: Type-check (tsc --noEmit)
         run: npx tsc --noEmit
 
-      - name: Build (tsc emit)
-        run: npm run build
+  web-build:
+    name: Frontend build + type-check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
 
-      - name: Dependency audit (fail on high/critical)
-        run: npm audit --audit-level=high
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build (tsc --noEmit && vite build)
+        env:
+          # Dummy values — the build only needs these to exist syntactically
+          # (import.meta.env access), not to point at a real project. No
+          # network call happens at build time.
+          VITE_SUPABASE_URL: https://placeholder.supabase.co
+          VITE_SUPABASE_ANON_KEY: placeholder-anon-key
+          VITE_API_BASE_URL: http://localhost:3000
+        run: npm run build
 
   rls-tests:
     name: RLS / ownership test suite

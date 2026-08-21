@@ -22,6 +22,8 @@ declare
   cand_a_id uuid;
   cand_b_id uuid;
   evidence_a_id uuid;
+  opportunity_a_id uuid;
+  application_a_id uuid;
 begin
   insert into auth.users (id, email) values (user_a_id, 'cascade-alice@example.edu');
   insert into auth.users (id, email) values (user_b_id, 'cascade-bob@example.edu');
@@ -71,6 +73,18 @@ begin
   insert into public.claim (candidate_id, subject_entity_type, subject_entity_id, claim_text, evidence_source_id)
   values (cand_a_id, 'project', gen_random_uuid(), 'Built InternshipOS end to end.', evidence_a_id);
 
+  insert into public.opportunity (candidate_id, title, company)
+  values (cand_a_id, 'Platform Intern', 'Cascade Inc') returning id into opportunity_a_id;
+
+  insert into public.application (candidate_id, opportunity_id)
+  values (cand_a_id, opportunity_a_id) returning id into application_a_id;
+
+  insert into public.application_status_event (application_id, candidate_id, from_status, to_status)
+  values (application_a_id, cand_a_id, null, 'SAVED');
+
+  insert into public.application_note (application_id, candidate_id, content)
+  values (application_a_id, cand_a_id, 'Found via career fair.');
+
   -- Minimal data for user B, to prove deletion is scoped to user A only.
   insert into public.skill (candidate_id, name, category)
   values (cand_b_id, 'Python', 'language');
@@ -101,13 +115,17 @@ begin
     union all select 'certification' where not exists (select 1 from public.certification where candidate_id = v_cand)
     union all select 'evidence_source' where not exists (select 1 from public.evidence_source where candidate_id = v_cand)
     union all select 'claim' where not exists (select 1 from public.claim where candidate_id = v_cand)
+    union all select 'opportunity' where not exists (select 1 from public.opportunity where candidate_id = v_cand)
+    union all select 'application' where not exists (select 1 from public.application where candidate_id = v_cand)
+    union all select 'application_status_event' where not exists (select 1 from public.application_status_event where candidate_id = v_cand)
+    union all select 'application_note' where not exists (select 1 from public.application_note where candidate_id = v_cand)
   ) missing
   limit 1;
 
   if v_missing is not null then
     raise exception 'FAIL: test setup did not actually seed the % table for user A', v_missing;
   end if;
-  raise notice 'PASS: all 11 Phase-0 tables confirmed populated for user A prior to deletion';
+  raise notice 'PASS: all 11 Phase-0 tables + 4 Phase-1 tables confirmed populated for user A prior to deletion';
 end $$;
 
 \echo '--- Test 2: deleting the auth.users row cascades through candidate to every domain table ---'
@@ -139,13 +157,17 @@ begin
     union all select 'certification' where exists (select 1 from public.certification where candidate_id = v_cand)
     union all select 'evidence_source' where exists (select 1 from public.evidence_source where candidate_id = v_cand)
     union all select 'claim' where exists (select 1 from public.claim where candidate_id = v_cand)
+    union all select 'opportunity' where exists (select 1 from public.opportunity where candidate_id = v_cand)
+    union all select 'application' where exists (select 1 from public.application where candidate_id = v_cand)
+    union all select 'application_status_event' where exists (select 1 from public.application_status_event where candidate_id = v_cand)
+    union all select 'application_note' where exists (select 1 from public.application_note where candidate_id = v_cand)
   ) remaining
   limit 1;
 
   if v_remaining is not null then
     raise exception 'FAIL: % still has a row for user A after auth.users deletion — cascade chain is broken', v_remaining;
   end if;
-  raise notice 'PASS: deleting auth.users cascades through candidate to remove every row across all 11 Phase-0 tables';
+  raise notice 'PASS: deleting auth.users cascades through candidate to remove every row across all 11 Phase-0 tables + 4 Phase-1 tables';
 end $$;
 
 \echo '--- Test 3: deleting user A''s account did NOT affect user B''s data (deletion is scoped, not global) ---'

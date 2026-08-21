@@ -15,7 +15,6 @@ import { Router } from "express";
 import type { AuthedRequest } from "../middleware/auth.js";
 import type { Env } from "../lib/env.js";
 import { adminClient } from "../lib/supabaseClient.js";
-import { EVIDENCE_BUCKET } from "../lib/storageClient.js";
 
 export function accountRouter(env: Env): Router {
   const router = Router();
@@ -51,6 +50,10 @@ export function accountRouter(env: Env): Router {
       certifications,
       evidenceSources,
       claims,
+      opportunities,
+      applications,
+      applicationStatusEvents,
+      applicationNotes,
     ] = await Promise.all([
       supabase.from("personal_info").select("*").eq("candidate_id", candidateId).maybeSingle(),
       supabase.from("consent_record").select("*").eq("candidate_id", candidateId),
@@ -63,6 +66,12 @@ export function accountRouter(env: Env): Router {
       supabase.from("certification").select("*").eq("candidate_id", candidateId),
       supabase.from("evidence_source").select("*").eq("candidate_id", candidateId),
       supabase.from("claim").select("*").eq("candidate_id", candidateId),
+      // Phase 1 tables — same "scoped to caller via RLS + explicit .eq
+      // for readability" pattern as every table above.
+      supabase.from("opportunity").select("*").eq("candidate_id", candidateId),
+      supabase.from("application").select("*").eq("candidate_id", candidateId),
+      supabase.from("application_status_event").select("*").eq("candidate_id", candidateId),
+      supabase.from("application_note").select("*").eq("candidate_id", candidateId),
     ]);
 
     const firstError = [
@@ -77,6 +86,10 @@ export function accountRouter(env: Env): Router {
       certifications,
       evidenceSources,
       claims,
+      opportunities,
+      applications,
+      applicationStatusEvents,
+      applicationNotes,
     ].find((r) => r.error);
 
     if (firstError?.error) {
@@ -97,6 +110,10 @@ export function accountRouter(env: Env): Router {
       certifications: certifications.data,
       evidence_sources: evidenceSources.data,
       claims: claims.data,
+      opportunities: opportunities.data,
+      applications: applications.data,
+      application_status_events: applicationStatusEvents.data,
+      application_notes: applicationNotes.data,
     });
   });
 
@@ -121,47 +138,26 @@ export function accountRouter(env: Env): Router {
     // info, consent_record, education, work_authorization, skill, project,
     // experience, achievement, certification, evidence_source, claim) —
     // matching §6's "Deletion cascades: PersonalInfo, Education, all
-    // claim-bearing entities, EvidenceSource, Claim rows themselves."
+    // claim-bearing entities, EvidenceSource, Claim rows themselves." —
+    // AND, as of Phase 1, the same cascade chain also removes opportunity,
+    // application, application_status_event, and application_note
+    // (0017-0020), since those tables also reference candidate(id) on
+    // delete cascade. See tests/rls/test_account_deletion_cascade.sql,
+    // extended in Phase 1 to assert this across all 15 tables together.
     // Deleting only public.candidate and leaving auth.users behind would
     // be a WORSE bug than not implementing this at all: the person could
     // still log in, and the 0006_signup_provisioning.sql trigger would
     // silently re-provision a brand-new, empty candidate row on their next
     // authenticated request — an "account that won't stay deleted."
     //
-    // Gate 1a: purge Storage-backed evidence files BEFORE the admin
-    // cascade below removes the DB rows that reference them. This runs
-    // through req.supabase — the caller's own JWT-scoped client, same as
-    // everywhere else — not the admin client, so storage.objects RLS
-    // (0017_evidence_storage_bucket.sql) is what actually scopes this to
-    // the caller's own files. Fetching the paths first (rather than after
-    // deleteUser()) matters: once the auth.users row is gone, this same
-    // client's JWT is no longer backed by a real user, and the cascade
-    // will have already removed the evidence_source rows that hold these
-    // paths.
-    //
-    // Best-effort, same tolerance as evidence-source.ts's own DELETE
-    // handler: a Storage failure here should not block account deletion —
-    // the account and all DB rows ARE getting deleted either way, and an
-    // orphaned Storage object is a cleanup concern, not a security one
-    // (nothing can reach it — the candidate row that owned it is gone).
-    const { data: filesToDelete, error: filesError } = await supabase
-      .from("evidence_source")
-      .select("file_ref")
-      .eq("source_type", "document_upload")
-      .not("file_ref", "is", null);
-
-    if (filesError) {
-      console.warn(`account.ts: failed to list evidence files before deletion: ${filesError.message}`);
-    } else {
-      const paths = (filesToDelete ?? []).map((f) => f.file_ref).filter((p): p is string => !!p);
-      if (paths.length > 0) {
-        const { error: storageError } = await supabase.storage.from(EVIDENCE_BUCKET).remove(paths);
-        if (storageError) {
-          console.warn(`account.ts: failed to purge ${paths.length} evidence file(s): ${storageError.message}`);
-        }
-      }
-    }
-
+    // KNOWN GAP: this does not purge any files from Supabase Storage that
+    // an EvidenceSource.file_ref might point to. §6 says deletion should
+    // include "EvidenceSource (including stored files)", but no file
+    // upload flow exists in this repo yet (evidence-source.ts only stores
+    // a file_ref path string; nothing currently writes to Storage) — so
+    // there is no bucket/convention to purge against yet. This needs to be
+    // revisited when the actual upload endpoint is built, not invented
+    // here ahead of it.
     const admin = adminClient(env);
     const { error: deleteError } = await admin.auth.admin.deleteUser(userData.user.id);
 

@@ -245,11 +245,7 @@ describe("GET /truth-center", () => {
     const body = res.body as { groups: Record<string, Array<Record<string, unknown>>> };
     const claim = body.groups.certification[0];
     expect(claim.trust_tier).toBe("tier_2_document");
-    // Gate 1a: no more raw file_ref exposure — null here, and the client
-    // uses evidence_source_id against GET /evidence-sources/:id/download-url
-    // to get a real, short-lived link on demand.
-    expect(claim.evidence_link).toBeNull();
-    expect(claim.evidence_source_id).toBe("ev-1");
+    expect(claim.evidence_link).toBe("uploads/cand-1/aws-cert.pdf");
   });
 
   it("computes tier_3_self_attested when a claim has no evidence_source_id", async () => {

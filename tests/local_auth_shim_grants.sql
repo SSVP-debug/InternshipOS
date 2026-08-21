@@ -37,19 +37,27 @@ grant select, insert, update, delete on public.evidence_source to authenticated;
 -- coarser table-level half of that same "claims are permanent" rule).
 grant select, insert, update on public.claim to authenticated;
 
--- anon gets nothing in Phase 0 — no unauthenticated read/write surface yet.
+-- Phase 1: Opportunity entity grants (multi-row, candidate-owned, same
+-- pattern as education/skill/project).
+grant select, insert, update, delete on public.opportunity to authenticated;
 
--- Gate 1a: evidence Storage bucket grants. No delete-only/update grant on
--- storage.objects beyond what's below — evidence documents are immutable
--- once uploaded (0017_evidence_storage_bucket.sql), matching the RLS
--- policies (no update policy exists there either).
-grant select, insert, delete on storage.objects to authenticated;
-grant select on storage.buckets to authenticated;
+-- Phase 1: Application entity grants. Delete IS granted here (unlike
+-- claim) — see 0018_application.sql's header for why the DB still allows
+-- it even though the API layer doesn't currently expose a DELETE route.
+grant select, insert, update, delete on public.application to authenticated;
+
+-- Phase 1: Application status history grants. No update/delete grant —
+-- immutable history, same "claims are permanent" treatment as public.claim.
+grant select, insert on public.application_status_event to authenticated;
+
+-- Phase 1: Application notes grants (multi-row, editable, lightweight).
+grant select, insert, update, delete on public.application_note to authenticated;
+
+-- anon gets nothing in Phase 0/1 — no unauthenticated read/write surface yet.
 
 -- service_role bypasses RLS via the bypassrls role attribute (set in
 -- local_auth_shim.sql) and is the only role permitted to act across
 -- candidates — used exclusively by trusted backend code (e.g. the signup
 -- endpoint's post-provisioning step), never exposed to a client.
-grant all on public.candidate, public.personal_info, public.consent_record, public.education, public.work_authorization, public.skill, public.project, public.experience, public.achievement, public.certification, public.evidence_source, public.claim
+grant all on public.candidate, public.personal_info, public.consent_record, public.education, public.work_authorization, public.skill, public.project, public.experience, public.achievement, public.certification, public.evidence_source, public.claim, public.opportunity, public.application, public.application_status_event, public.application_note
   to service_role;
-grant all on storage.objects, storage.buckets to service_role;

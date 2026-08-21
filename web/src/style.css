@@ -1,0 +1,690 @@
+/* ============================================================
+   InternshipOS — design tokens
+   Concept: a field notebook for the internship hunt — the physical
+   index-card-file feel of tracking applications, translated to a calm
+   workspace. Paper background, ink text, a warm signal color reserved
+   for "this needs you," a quiet confirmed-green, and a small gold flag
+   for priority. Serif for headings (the "notebook" voice), a clean
+   sans for data/UI chrome (the "instrument" voice).
+   ============================================================ */
+
+:root {
+  --paper: #faf7f2;
+  --paper-raised: #ffffff;
+  --ink: #1c2321;
+  --ink-soft: #4b544f;
+  --ink-faint: #8a938c;
+  --line: #e2dccf;
+  --line-strong: #cfc6b2;
+
+  --accent-urgent: #c1440e;
+  --accent-urgent-bg: #fbe9e1;
+  --accent-confirmed: #3f6b4f;
+  --accent-confirmed-bg: #e7f0ea;
+  --accent-priority: #b8860b;
+  --accent-priority-bg: #faf1dc;
+  --accent-neutral: #2e4057;
+  --accent-neutral-bg: #e8ecf2;
+  --accent-dispute: #8a2f4b;
+  --accent-dispute-bg: #f5e6ec;
+
+  --font-display: ui-serif, "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+  --font-mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+
+  --radius: 8px;
+  --radius-sm: 4px;
+  --shadow-card: 0 1px 2px rgba(28, 35, 33, 0.06), 0 1px 1px rgba(28, 35, 33, 0.04);
+  --shadow-raised: 0 4px 16px rgba(28, 35, 33, 0.1);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  color: var(--ink);
+  margin: 0 0 0.4em;
+}
+
+a {
+  color: var(--accent-neutral);
+}
+
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
+  font-size: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent-neutral);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* ── App shell ─────────────────────────────────────────────── */
+
+.shell {
+  display: flex;
+  min-height: 100vh;
+}
+
+.sidebar {
+  width: 220px;
+  flex-shrink: 0;
+  background: var(--paper-raised);
+  border-right: 1px solid var(--line);
+  padding: 24px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.brand__mark {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 20px;
+  color: var(--ink);
+}
+
+.brand__tag {
+  font-size: 11px;
+  color: var(--ink-faint);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.nav__link {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border-radius: var(--radius-sm);
+  color: var(--ink-soft);
+  text-decoration: none;
+  font-size: 14px;
+}
+
+.nav__link:hover {
+  background: var(--paper);
+  color: var(--ink);
+}
+
+.nav__link--active {
+  background: var(--accent-neutral-bg);
+  color: var(--accent-neutral);
+  font-weight: 600;
+}
+
+.nav__badge {
+  margin-left: auto;
+  background: var(--accent-urgent);
+  color: #fff;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-family: var(--font-mono);
+}
+
+.sidebar__footer {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sidebar__user {
+  font-size: 12px;
+  color: var(--ink-faint);
+  word-break: break-all;
+}
+
+.main {
+  flex: 1;
+  min-width: 0;
+  padding: 32px 40px 64px;
+  max-width: 980px;
+}
+
+.page-loading {
+  color: var(--ink-faint);
+  padding: 40px;
+  font-style: italic;
+}
+
+/* ── Typography helpers ───────────────────────────────────── */
+
+.page-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 24px;
+  flex-wrap: wrap;
+}
+
+.page-header h1 {
+  font-size: 28px;
+}
+
+.subtle {
+  color: var(--ink-faint);
+  font-size: 13px;
+}
+
+.section-title {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--ink-faint);
+  margin: 32px 0 12px;
+}
+
+.section-title:first-child {
+  margin-top: 0;
+}
+
+/* ── Cards ─────────────────────────────────────────────────── */
+
+.card {
+  background: var(--paper-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+  padding: 18px 20px;
+}
+
+.card + .card {
+  margin-top: 10px;
+}
+
+/* Signature element: the "index card" stub — a dashed tear-edge on the
+   left, colored by urgency, evoking a physical card-file tab. Used for
+   Today's action items. */
+.stub {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  background: var(--paper-raised);
+  border: 1px solid var(--line);
+  border-left: 4px dashed var(--line-strong);
+  border-radius: var(--radius-sm);
+  padding: 14px 16px;
+  margin-bottom: 8px;
+}
+
+.stub--urgent {
+  border-left-color: var(--accent-urgent);
+}
+
+.stub--confirmed {
+  border-left-color: var(--accent-confirmed);
+}
+
+.stub--priority {
+  border-left-color: var(--accent-priority);
+}
+
+.stub__due {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--accent-urgent);
+  white-space: nowrap;
+  padding-top: 2px;
+}
+
+.stub__body {
+  flex: 1;
+  min-width: 0;
+}
+
+.stub__title {
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
+.stub__meta {
+  font-size: 13px;
+  color: var(--ink-faint);
+}
+
+.stub__actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.empty {
+  color: var(--ink-faint);
+  font-style: italic;
+  padding: 16px 0;
+}
+
+/* ── Buttons ───────────────────────────────────────────────── */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--line-strong);
+  background: var(--paper-raised);
+  color: var(--ink);
+  padding: 7px 14px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 13.5px;
+  font-weight: 500;
+  text-decoration: none;
+}
+
+.btn:hover {
+  border-color: var(--ink-soft);
+}
+
+.btn--primary {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--paper-raised);
+}
+
+.btn--primary:hover {
+  background: #000;
+}
+
+.btn--danger {
+  color: var(--accent-urgent);
+  border-color: var(--accent-urgent);
+}
+
+.btn--danger:hover {
+  background: var(--accent-urgent-bg);
+}
+
+.btn--small {
+  padding: 4px 10px;
+  font-size: 12.5px;
+}
+
+.btn--ghost {
+  border-color: transparent;
+  background: transparent;
+}
+
+.btn--ghost:hover {
+  background: var(--paper);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* ── Forms ─────────────────────────────────────────────────── */
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.form-row {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  min-width: 160px;
+}
+
+.field label {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink-soft);
+}
+
+.field input,
+.field select,
+.field textarea {
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  background: var(--paper-raised);
+  color: var(--ink);
+}
+
+.field textarea {
+  resize: vertical;
+  min-height: 70px;
+}
+
+.field--checkbox {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.field--checkbox label {
+  font-weight: 400;
+}
+
+.field-error {
+  color: var(--accent-urgent);
+  font-size: 12px;
+}
+
+.form-error {
+  background: var(--accent-urgent-bg);
+  color: var(--accent-urgent);
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 13.5px;
+}
+
+/* ── Status pills ──────────────────────────────────────────── */
+
+.pill {
+  display: inline-block;
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 2px 9px;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.pill--saved,
+.pill--new {
+  background: var(--accent-neutral-bg);
+  color: var(--accent-neutral);
+}
+
+.pill--applying,
+.pill--assessment {
+  background: var(--accent-priority-bg);
+  color: var(--accent-priority);
+}
+
+.pill--applied,
+.pill--interview,
+.pill--saved-inbox {
+  background: var(--accent-neutral-bg);
+  color: var(--accent-neutral);
+}
+
+.pill--offer,
+.pill--confirmed,
+.pill--tier_1_verified {
+  background: var(--accent-confirmed-bg);
+  color: var(--accent-confirmed);
+}
+
+.pill--rejected,
+.pill--withdrawn,
+.pill--dismissed,
+.pill--disputed,
+.pill--revoked {
+  background: #efece6;
+  color: var(--ink-faint);
+}
+
+.pill--draft,
+.pill--tier_3_self_attested {
+  background: #efece6;
+  color: var(--ink-soft);
+}
+
+.pill--tier_2_document {
+  background: var(--accent-priority-bg);
+  color: var(--accent-priority);
+}
+
+.pill--superseded {
+  background: var(--accent-dispute-bg);
+  color: var(--accent-dispute);
+}
+
+.star {
+  color: var(--accent-priority);
+}
+
+/* ── Lists / tables ────────────────────────────────────────── */
+
+.list-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 4px;
+  border-bottom: 1px solid var(--line);
+}
+
+.list-row:last-child {
+  border-bottom: none;
+}
+
+.list-row__main {
+  flex: 1;
+  min-width: 0;
+}
+
+.list-row__title {
+  font-weight: 600;
+}
+
+.list-row__meta {
+  font-size: 13px;
+  color: var(--ink-faint);
+}
+
+/* ── Stat strip ────────────────────────────────────────────── */
+
+.stat-strip {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 28px;
+}
+
+.stat {
+  background: var(--paper-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 12px 18px;
+  min-width: 110px;
+}
+
+.stat__value {
+  font-family: var(--font-display);
+  font-size: 26px;
+  font-weight: 700;
+}
+
+.stat__label {
+  font-size: 11.5px;
+  color: var(--ink-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* ── Auth / centered pages ────────────────────────────────── */
+
+.centered-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.auth-card {
+  width: 380px;
+  max-width: 100%;
+  background: var(--paper-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-raised);
+  padding: 32px;
+}
+
+.auth-card h1 {
+  font-size: 22px;
+  margin-bottom: 4px;
+}
+
+/* ── Tabs (Profile page) ──────────────────────────────────── */
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+}
+
+.tab {
+  padding: 9px 14px;
+  font-size: 13.5px;
+  color: var(--ink-faint);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  background: none;
+  border-top: none;
+  border-left: none;
+  border-right: none;
+}
+
+.tab--active {
+  color: var(--ink);
+  border-bottom-color: var(--accent-neutral);
+  font-weight: 600;
+}
+
+/* ── Toasts ────────────────────────────────────────────────── */
+
+.toast {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  background: var(--ink);
+  color: var(--paper-raised);
+  padding: 12px 18px;
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-raised);
+  opacity: 0;
+  transform: translateY(8px);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  z-index: 1000;
+  max-width: 360px;
+}
+
+.toast--error {
+  background: var(--accent-urgent);
+}
+
+.toast--visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* ── Utility ───────────────────────────────────────────────── */
+
+.spread {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.stack-sm > * + * {
+  margin-top: 8px;
+}
+
+.tag {
+  display: inline-block;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px 9px;
+  font-size: 12px;
+  color: var(--ink-soft);
+  margin: 2px 4px 2px 0;
+}
+
+.link-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+@media (max-width: 760px) {
+  .shell {
+    flex-direction: column;
+  }
+  .sidebar {
+    width: 100%;
+    flex-direction: row;
+    align-items: center;
+    overflow-x: auto;
+    padding: 12px;
+  }
+  .sidebar__footer {
+    display: none;
+  }
+  .nav {
+    flex-direction: row;
+  }
+  .main {
+    padding: 20px;
+  }
+}

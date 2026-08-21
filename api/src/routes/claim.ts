@@ -39,47 +39,6 @@ async function getOwnCandidateId(req: AuthedRequest): Promise<string | null> {
   return data.id as string;
 }
 
-// ── subject_entity_id existence check (Gate 0) ──────────────────────────
-// subject_entity_id has no DB-level FK (0016_claim.sql — Postgres can't FK
-// across multiple target tables from one column), so the migration's own
-// comment calls for this to be an app-layer check. This is that check.
-//
-// Table/idColumn pairs mirror truth-center.ts's ENTITY_LOOKUP exactly —
-// duplicated here rather than imported, since extracting a shared module
-// would mean restructuring truth-center.ts, which is out of scope for
-// this change. If subject_entity_type ever gains a new value, both this
-// map and truth-center.ts's ENTITY_LOOKUP need to be updated together.
-//
-// The lookup runs through req.supabase (the caller's own JWT-scoped
-// client), so RLS scopes the existence check to the caller's own rows for
-// free — a subject_entity_id belonging to another candidate is
-// indistinguishable from one that doesn't exist at all, which is the
-// correct behavior (no cross-candidate information leak).
-const SUBJECT_ENTITY_TABLE: Record<string, { table: string; idColumn: string }> = {
-  education: { table: "education", idColumn: "id" },
-  work_authorization: { table: "work_authorization", idColumn: "candidate_id" },
-  skill: { table: "skill", idColumn: "id" },
-  project: { table: "project", idColumn: "id" },
-  experience: { table: "experience", idColumn: "id" },
-  achievement: { table: "achievement", idColumn: "id" },
-  certification: { table: "certification", idColumn: "id" },
-};
-
-async function subjectEntityExists(
-  req: AuthedRequest,
-  subjectEntityType: string,
-  subjectEntityId: string
-): Promise<boolean> {
-  const config = SUBJECT_ENTITY_TABLE[subjectEntityType];
-  if (!config) return false; // unreachable in practice — schema enum already restricts this
-  const { data, error } = await req
-    .supabase!.from(config.table)
-    .select(config.idColumn)
-    .eq(config.idColumn, subjectEntityId)
-    .maybeSingle();
-  return !error && !!data;
-}
-
 // Postgres check_violation, raised by check_claim_status_transition() for
 // any transition not in the approved ClaimStatus table.
 const CHECK_VIOLATION = "23514";
@@ -128,11 +87,6 @@ export function claimRouter(): Router {
       return res.status(400).json({ error: "invalid_request", details: parsed.error.flatten() });
     }
 
-    const exists = await subjectEntityExists(req, parsed.data.subject_entity_type, parsed.data.subject_entity_id);
-    if (!exists) {
-      return res.status(400).json({ error: "subject_entity_not_found" });
-    }
-
     const candidateId = await getOwnCandidateId(req);
     if (!candidateId) {
       return res.status(404).json({ error: "candidate_not_found" });
@@ -162,11 +116,6 @@ export function claimRouter(): Router {
     const parsed = ClaimRequestSchema.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({ error: "invalid_request", details: parsed.error.flatten() });
-    }
-
-    const exists = await subjectEntityExists(req, parsed.data.subject_entity_type, parsed.data.subject_entity_id);
-    if (!exists) {
-      return res.status(400).json({ error: "subject_entity_not_found" });
     }
 
     const supabase = req.supabase!;

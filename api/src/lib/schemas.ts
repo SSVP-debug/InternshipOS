@@ -234,19 +234,6 @@ export const EvidenceSourceRequestSchema = z
   );
 export type EvidenceSourceRequest = z.infer<typeof EvidenceSourceRequestSchema>;
 
-// ── EvidenceSource Storage upload (Gate 1a) ─────────────────────────────
-// Body for POST /evidence-sources/upload-url — requests a signed upload
-// slot before an evidence_source row exists to attach an id to. content_
-// type is optional since the client may not always know it upfront; when
-// given, it's passed through to Supabase Storage's signed-upload call,
-// which is itself constrained by the bucket's allowed_mime_types.
-
-export const UploadUrlRequestSchema = z.object({
-  filename: z.string().trim().min(1),
-  content_type: z.string().optional(),
-});
-export type UploadUrlRequest = z.infer<typeof UploadUrlRequestSchema>;
-
 // ── Claim (Day 4) ────────────────────────────────────────────────────────
 // Mirrors 0016_claim.sql. `status` is intentionally NOT part of the create/
 // update body schema — status changes go through a dedicated transition
@@ -274,3 +261,82 @@ export const ClaimStatusTransitionSchema = z.object({
   status: z.enum(["CONFIRMED", "DISPUTED", "SUPERSEDED", "REVOKED"]),
 });
 export type ClaimStatusTransition = z.infer<typeof ClaimStatusTransitionSchema>;
+
+// ── Opportunity (Phase 1) ────────────────────────────────────────────────
+// Mirrors 0017_opportunity.sql exactly. inbox_status and is_priority are
+// deliberately NOT part of the create/update body — the Opportunity Inbox
+// actions (save/dismiss/prioritize) go through a dedicated
+// PATCH /opportunities/:id/inbox endpoint instead, same "one entry point
+// per state machine" discipline used for Claim's status and, below,
+// Application's status.
+
+export const OpportunityRequestSchema = z.object({
+  title: z.string().trim().min(1),
+  company: z.string().trim().min(1),
+  description: z.string().optional(),
+  location: z.string().optional(),
+  work_mode: z.enum(["remote", "hybrid", "onsite"]).optional(),
+  employment_type: z.enum(["internship", "co_op", "full_time", "part_time"]).optional().default("internship"),
+  skills: z.array(z.string().trim().min(1)).optional().default([]),
+  application_url: z.string().url().optional(),
+  source: z
+    .enum(["manual", "referral", "company_site", "job_board", "career_fair", "other"])
+    .optional()
+    .default("manual"),
+  deadline_date: dateString.optional(),
+  posted_date: dateString.optional(),
+});
+export type OpportunityRequest = z.infer<typeof OpportunityRequestSchema>;
+
+export const OpportunityInboxUpdateSchema = z
+  .object({
+    inbox_status: z.enum(["new", "saved", "dismissed"]).optional(),
+    is_priority: z.boolean().optional(),
+  })
+  .refine((data) => data.inbox_status !== undefined || data.is_priority !== undefined, {
+    message: "at least one of inbox_status or is_priority must be provided",
+  });
+export type OpportunityInboxUpdate = z.infer<typeof OpportunityInboxUpdateSchema>;
+
+// ── Application (Phase 1) ────────────────────────────────────────────────
+// Mirrors 0018_application.sql. `status` is intentionally NOT part of the
+// create/update body — status changes go through the dedicated
+// PATCH /applications/:id/status endpoint, mirroring Claim's pattern
+// exactly (see claim's ClaimRequestSchema comment above).
+
+export const ApplicationCreateRequestSchema = z.object({
+  opportunity_id: z.string().uuid(),
+  deadline_override: dateString.optional(),
+  next_action_date: dateString.optional(),
+  next_action_note: z.string().optional(),
+  recruiter_name: z.string().optional(),
+  recruiter_email: z.string().email().optional(),
+});
+export type ApplicationCreateRequest = z.infer<typeof ApplicationCreateRequestSchema>;
+
+// PUT body — everything editable except opportunity_id (an application
+// doesn't get re-pointed at a different opportunity; withdraw and create a
+// new one instead) and status (see above).
+export const ApplicationUpdateRequestSchema = z.object({
+  deadline_override: dateString.optional(),
+  next_action_date: dateString.optional(),
+  next_action_note: z.string().optional(),
+  recruiter_name: z.string().optional(),
+  recruiter_email: z.string().email().optional(),
+});
+export type ApplicationUpdateRequest = z.infer<typeof ApplicationUpdateRequestSchema>;
+
+export const ApplicationStatusTransitionSchema = z.object({
+  status: z.enum(["SAVED", "APPLYING", "APPLIED", "ASSESSMENT", "INTERVIEW", "OFFER", "REJECTED", "WITHDRAWN"]),
+  note: z.string().optional(),
+});
+export type ApplicationStatusTransition = z.infer<typeof ApplicationStatusTransitionSchema>;
+
+// ── ApplicationNote (Phase 1) ────────────────────────────────────────────
+// Mirrors 0020_application_note.sql exactly.
+
+export const ApplicationNoteRequestSchema = z.object({
+  note_type: z.enum(["general", "recruiter_contact", "interview", "next_action", "link"]).optional().default("general"),
+  content: z.string().trim().min(1),
+});
+export type ApplicationNoteRequest = z.infer<typeof ApplicationNoteRequestSchema>;
