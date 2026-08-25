@@ -11,7 +11,8 @@
     "test": "vitest run",
     "typecheck:scripts": "tsc --noEmit -p tsconfig.scripts.json",
     "smoke:prod": "tsx scripts/smoke-prod.ts",
-    "ingest": "tsx scripts/ingest.ts"
+    "ingest": "tsx scripts/ingest.ts",
+    "match": "tsx scripts/run-matching.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.4",
