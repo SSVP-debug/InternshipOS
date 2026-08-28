@@ -18,6 +18,30 @@ const EnvSchema = z.object({
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
   PORT: z.coerce.number().int().positive().default(3000),
   CONSENT_POLICY_VERSION: z.string().default("v1.0"),
+
+  // Controls logger.ts's pino transport (pretty-printed outside
+  // production) and log level default. "test" behaves like "development"
+  // everywhere except vitest sets it automatically via its own env
+  // handling — not asserted on here, just accepted as a valid value.
+  NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
+
+  // CORS allowlist for server.ts's createApp(): comma-separated list of
+  // exact origins (e.g. "https://app.example.com,https://staging.example.com").
+  // Unset means no cross-origin requests are allowed at all — never
+  // reflected as a wildcard. Parsed once in server.ts, not here, to keep
+  // this schema's output plain strings (same convention as every other
+  // field) rather than a pre-split array.
+  ALLOWED_ORIGINS: z.string().optional(),
+
+  // Shared window for both rate limiters below (rateLimit.ts). Kept as one
+  // value rather than a separate window per limiter — this repo has never
+  // needed two different windows, and a single knob is one fewer thing to
+  // misconfigure.
+  RATE_LIMIT_WINDOW_MINUTES: z.coerce.number().int().positive().default(15),
+  // POST /signup's tighter limiter (rateLimit.ts's signupRateLimiter) —
+  // see that file's header comment for why signup specifically gets its
+  // own, stricter limit.
+  SIGNUP_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(5),
 });
 
 export type Env = z.infer<typeof EnvSchema>;

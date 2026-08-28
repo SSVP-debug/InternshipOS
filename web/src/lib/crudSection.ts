@@ -10,7 +10,7 @@
 // caller via `renderExtra`, not baked into this generic builder.
 
 import { h, toast, errorMessage } from "./dom";
-import { ApiError, type CrudApi } from "./api";
+import { type CrudApi } from "./api";
 
 export type FieldType = "text" | "textarea" | "date" | "number" | "checkbox" | "select" | "tags";
 
@@ -156,7 +156,7 @@ export function renderCrudSection<T extends { id: string }>(config: CrudSectionC
             await load();
             onDone();
           } catch (err) {
-            errorBox.textContent = err instanceof ApiError ? err.message : errorMessage(err);
+            errorBox.textContent = errorMessage(err);
             errorBox.style.display = "block";
           } finally {
             submitBtn.removeAttribute("disabled");

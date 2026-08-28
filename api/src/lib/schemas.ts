@@ -234,6 +234,14 @@ export const EvidenceSourceRequestSchema = z
   );
 export type EvidenceSourceRequest = z.infer<typeof EvidenceSourceRequestSchema>;
 
+// POST /evidence-sources/upload-url (Gate 1a) — the client asks for a
+// Storage upload slot before an evidence_source row exists to attach an
+// id to (see 0021_evidence_storage_bucket.sql's path-convention comment).
+export const UploadUrlRequestSchema = z.object({
+  filename: z.string().trim().min(1),
+});
+export type UploadUrlRequest = z.infer<typeof UploadUrlRequestSchema>;
+
 // ── Claim (Day 4) ────────────────────────────────────────────────────────
 // Mirrors 0016_claim.sql. `status` is intentionally NOT part of the create/
 // update body schema — status changes go through a dedicated transition

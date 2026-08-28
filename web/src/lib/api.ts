@@ -442,3 +442,57 @@ export interface TodayView {
   };
 }
 export const getToday = () => get<TodayView>("/today");
+
+// ── Opportunity Feed (Phase 2B) ──────────────────────────────────────────
+// Read/aggregation layer over opportunity_source + opportunity_match — a
+// DIFFERENT concept from the Opportunity (Phase 1) inbox above: these
+// items come from the auto-ingested catalog + the candidate's own
+// matchEngine.ts scores, not from anything the candidate typed in
+// manually. Save/dismiss/priority live on opportunity_match here, mirror
+// of the same three fields on Opportunity above.
+export interface OpportunityFeedItem {
+  opportunity_match_id: string;
+  opportunity_source_id: string;
+  title: string;
+  company: string;
+  location: string | null;
+  work_mode: string | null;
+  employment_type: string;
+  posted_date: string | null;
+  application_url: string | null;
+  match_score: number;
+  eligibility_status: "eligible" | "ineligible" | "unknown";
+  match_reasons: string[];
+  match_missing: string[];
+  match_unknown: string[];
+  inbox_status: "new" | "saved" | "dismissed";
+  is_priority: boolean;
+}
+export interface OpportunityFeedView {
+  generated_at: string;
+  items: OpportunityFeedItem[];
+}
+export const getOpportunityFeed = () => get<OpportunityFeedView>("/opportunity-feed");
+
+// PATCH /opportunity-matches/:id/inbox returns the raw opportunity_match
+// row (same columns the GET route selects), NOT a full OpportunityFeedItem
+// — it has no title/company/location/etc. and match_breakdown is the raw
+// jsonb column rather than the unpacked reasons/missing/unknown arrays.
+// Callers should merge inbox_status/is_priority back into their existing
+// feed item rather than treating this as a replacement item.
+export interface OpportunityMatchRecord {
+  id: string;
+  opportunity_source_id: string;
+  match_score: number;
+  eligibility_status: "eligible" | "ineligible" | "unknown";
+  match_breakdown: unknown;
+  inbox_status: "new" | "saved" | "dismissed";
+  is_priority: boolean;
+}
+export const updateOpportunityMatchInbox = (
+  matchId: string,
+  data: { inbox_status?: OpportunityFeedItem["inbox_status"]; is_priority?: boolean },
+) =>
+  patch<{ opportunity_match: OpportunityMatchRecord }>(`/opportunity-matches/${matchId}/inbox`, data).then(
+    (b) => b.opportunity_match,
+  );

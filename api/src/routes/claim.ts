@@ -1,9 +1,13 @@
 // claim.ts
 // GET   /claims             — list the caller's own claims
 // GET   /claims/:id         — get one of the caller's own claims
-// POST  /claims             — create a claim (always starts as DRAFT)
+// POST  /claims             — create a claim (always starts as DRAFT).
+//                             Runs Gate 0 (subject_entity_exists) first —
+//                             see subjectEntityExists() below.
 // PUT   /claims/:id         — update claim_text/evidence_source_id/subject
-//                             (does NOT touch status — see below)
+//                             (does NOT touch status — see below). Also
+//                             runs Gate 0 when subject_entity_type/_id are
+//                             being re-pointed.
 // PATCH /claims/:id/status  — the only way to move a claim through the
 //                             ClaimStatus lifecycle
 //
@@ -42,6 +46,47 @@ async function getOwnCandidateId(req: AuthedRequest): Promise<string | null> {
 // Postgres check_violation, raised by check_claim_status_transition() for
 // any transition not in the approved ClaimStatus table.
 const CHECK_VIOLATION = "23514";
+
+// subject_entity_type -> the table + id column it references. Mirrors
+// 0016_claim.sql's ClaimRequestSchema.subject_entity_type enum exactly.
+// work_authorization is a singleton keyed by candidate_id (its own PK,
+// per 0008_work_authorization.sql) rather than a separate `id` column —
+// every other subject entity has its own uuid `id` PK.
+const SUBJECT_ENTITY_TABLES: Record<string, { table: string; idColumn: string }> = {
+  education: { table: "education", idColumn: "id" },
+  work_authorization: { table: "work_authorization", idColumn: "candidate_id" },
+  skill: { table: "skill", idColumn: "id" },
+  project: { table: "project", idColumn: "id" },
+  experience: { table: "experience", idColumn: "id" },
+  achievement: { table: "achievement", idColumn: "id" },
+  certification: { table: "certification", idColumn: "id" },
+};
+
+// Gate 0 (docs/candidate-truth-layer-phase0.md Day 4, and 0016_claim.sql's
+// own header comment): subject_entity_id has no DB-level foreign key by
+// design — Postgres can't FK one column across multiple target tables —
+// so referential integrity for the polymorphic link is explicitly an
+// application-layer check, "validate on write". This runs the lookup
+// through req.supabase (the caller's own JWT), so RLS scoping means "row
+// doesn't exist" and "row exists but belongs to another candidate"
+// surface identically — no cross-candidate existence leak either way.
+async function subjectEntityExists(
+  req: AuthedRequest,
+  subjectEntityType: string,
+  subjectEntityId: string
+): Promise<boolean> {
+  const mapping = SUBJECT_ENTITY_TABLES[subjectEntityType];
+  if (!mapping) return false; // unreachable given schema validation already ran, but never assume
+
+  const { data, error } = await req
+    .supabase!.from(mapping.table)
+    .select(mapping.idColumn)
+    .eq(mapping.idColumn, subjectEntityId)
+    .maybeSingle();
+
+  if (error) return false;
+  return data !== null;
+}
 
 export function claimRouter(): Router {
   const router = Router();
@@ -87,6 +132,11 @@ export function claimRouter(): Router {
       return res.status(400).json({ error: "invalid_request", details: parsed.error.flatten() });
     }
 
+    const exists = await subjectEntityExists(req, parsed.data.subject_entity_type, parsed.data.subject_entity_id);
+    if (!exists) {
+      return res.status(400).json({ error: "subject_entity_not_found" });
+    }
+
     const candidateId = await getOwnCandidateId(req);
     if (!candidateId) {
       return res.status(404).json({ error: "candidate_not_found" });
@@ -116,6 +166,11 @@ export function claimRouter(): Router {
     const parsed = ClaimRequestSchema.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({ error: "invalid_request", details: parsed.error.flatten() });
+    }
+
+    const exists = await subjectEntityExists(req, parsed.data.subject_entity_type, parsed.data.subject_entity_id);
+    if (!exists) {
+      return res.status(400).json({ error: "subject_entity_not_found" });
     }
 
     const supabase = req.supabase!;

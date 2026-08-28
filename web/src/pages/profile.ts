@@ -2,8 +2,16 @@ import { h, toast, errorMessage } from "../lib/dom";
 import { renderShell } from "../lib/shell";
 import { renderCrudSection, type FieldConfig } from "../lib/crudSection";
 import {
+  WORK_AUTH_STATUS_OPTIONS,
+  EDUCATION_DEGREE_TYPE_OPTIONS,
+  EDUCATION_ENROLLMENT_STATUS_OPTIONS,
+  SKILL_CATEGORY_OPTIONS,
+  SKILL_SELF_RATING_OPTIONS,
+} from "../lib/profileFieldOptions";
+import {
   getProfile,
   saveProfile,
+  grantConsent,
   getWorkAuthorization,
   saveWorkAuthorization,
   updateWorkAuthorization,
@@ -146,26 +154,66 @@ function renderPersonalInfoForm(): HTMLElement {
       const errorBox = h("div", { class: "form-error", style: "display:none" }, []);
       const saveBtn = h("button", { class: "btn btn--primary", type: "submit" }, ["Save"]);
 
+      async function attemptSave(payload: PersonalInfo) {
+        errorBox.innerHTML = "";
+        errorBox.style.display = "none";
+        saveBtn.setAttribute("disabled", "");
+        try {
+          await saveProfile(payload);
+          toast("Personal info saved.");
+        } catch (err) {
+          if (err instanceof ApiError && err.code === "consent_required") {
+            // Self-service recovery path: a candidate can reach this form
+            // without ever having granted data_processing consent — most
+            // commonly an existing candidate who already has personal_info
+            // and so is never routed back through onboarding.ts's consent
+            // checkbox (see renderOnboarding's early-redirect). Without
+            // this, that candidate has NO way to grant consent from
+            // anywhere in the app and every save silently 403s forever.
+            errorBox.innerHTML = "";
+            errorBox.append(
+              h("span", {}, [
+                "Saving your profile requires granting consent for InternshipOS to process your data. ",
+              ]),
+              h(
+                "button",
+                {
+                  type: "button",
+                  class: "btn btn--small",
+                  onClick: async () => {
+                    try {
+                      await grantConsent("data_processing");
+                      toast("Consent granted.");
+                      await attemptSave(payload);
+                    } catch (grantErr) {
+                      errorBox.textContent = errorMessage(grantErr);
+                      errorBox.style.display = "block";
+                    }
+                  },
+                },
+                ["Grant consent and save"],
+              ),
+            );
+            errorBox.style.display = "block";
+          } else {
+            errorBox.textContent = errorMessage(err);
+            errorBox.style.display = "block";
+          }
+        } finally {
+          saveBtn.removeAttribute("disabled");
+        }
+      }
+
       const form = h(
         "form",
         {
           class: "form",
           onSubmit: async (e: Event) => {
             e.preventDefault();
-            errorBox.style.display = "none";
-            saveBtn.setAttribute("disabled", "");
-            try {
-              const payload = Object.fromEntries(
-                Array.from(inputs.entries()).map(([k, el]) => [k, el.value || undefined]),
-              ) as unknown as PersonalInfo;
-              await saveProfile(payload);
-              toast("Personal info saved.");
-            } catch (err) {
-              errorBox.textContent = err instanceof ApiError ? err.message : errorMessage(err);
-              errorBox.style.display = "block";
-            } finally {
-              saveBtn.removeAttribute("disabled");
-            }
+            const payload = Object.fromEntries(
+              Array.from(inputs.entries()).map(([k, el]) => [k, el.value || undefined]),
+            ) as unknown as PersonalInfo;
+            await attemptSave(payload);
           },
         },
         [...grouped, errorBox, saveBtn],
@@ -193,13 +241,7 @@ function renderWorkAuthorizationForm(): HTMLElement {
       const citizenship = h("input", { type: "text", required: true }) as HTMLInputElement;
       const status = h("select", { required: true }, [
         h("option", { value: "" }, ["Select status…"]),
-        ...[
-          ["us_citizen", "U.S. Citizen"],
-          ["permanent_resident", "Permanent Resident"],
-          ["visa_holder", "Visa Holder"],
-          ["requires_sponsorship", "Requires Sponsorship"],
-          ["other", "Other"],
-        ].map(([v, l]) => h("option", { value: v }, [l])),
+        ...WORK_AUTH_STATUS_OPTIONS.map(([v, l]) => h("option", { value: v }, [l])),
       ]) as HTMLSelectElement;
       const requiresSponsorship = h("input", { type: "checkbox" }) as HTMLInputElement;
       const expiry = h("input", { type: "date" }) as HTMLInputElement;
@@ -236,7 +278,7 @@ function renderWorkAuthorizationForm(): HTMLElement {
               else await saveWorkAuthorization(payload);
               toast("Work authorization saved.");
             } catch (err) {
-              errorBox.textContent = err instanceof ApiError ? err.message : errorMessage(err);
+              errorBox.textContent = errorMessage(err);
               errorBox.style.display = "block";
             } finally {
               saveBtn.removeAttribute("disabled");
@@ -391,7 +433,7 @@ function renderEducationSection(): HTMLElement {
   const fields: FieldConfig<Education>[] = [
     { key: "institution_name", label: "Institution", type: "text", required: true },
     { key: "institution_country", label: "Country", type: "text", required: true },
-    { key: "degree_type", label: "Degree type", type: "text", required: true, placeholder: "e.g. Bachelor's" },
+    { key: "degree_type", label: "Degree type", type: "select", required: true, options: EDUCATION_DEGREE_TYPE_OPTIONS },
     { key: "major", label: "Major", type: "text", required: true },
     { key: "minor", label: "Minor", type: "text" },
     { key: "start_date", label: "Start date", type: "date", required: true },
@@ -402,12 +444,7 @@ function renderEducationSection(): HTMLElement {
       label: "Enrollment status",
       type: "select",
       required: true,
-      options: [
-        ["enrolled", "Enrolled"],
-        ["graduated", "Graduated"],
-        ["on_leave", "On leave"],
-        ["withdrawn", "Withdrawn"],
-      ],
+      options: EDUCATION_ENROLLMENT_STATUS_OPTIONS,
     },
     { key: "is_primary", label: "This is my primary education", type: "checkbox" },
   ];
@@ -430,24 +467,13 @@ function renderSkillsSection(): HTMLElement {
       label: "Category",
       type: "select",
       required: true,
-      options: [
-        ["technical", "Technical"],
-        ["language", "Language"],
-        ["soft_skill", "Soft skill"],
-        ["tool", "Tool"],
-        ["other", "Other"],
-      ],
+      options: SKILL_CATEGORY_OPTIONS,
     },
     {
       key: "self_rating",
       label: "Self rating",
       type: "select",
-      options: [
-        ["beginner", "Beginner"],
-        ["intermediate", "Intermediate"],
-        ["advanced", "Advanced"],
-        ["expert", "Expert"],
-      ],
+      options: SKILL_SELF_RATING_OPTIONS,
     },
   ];
   return renderCrudSection<Skill>({

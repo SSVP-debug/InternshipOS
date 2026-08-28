@@ -15,6 +15,7 @@ interface NavItem {
 
 const NAV_ITEMS: NavItem[] = [
   { path: "/today", label: "Today", icon: "☉" },
+  { path: "/feed", label: "Feed", icon: "✦" },
   { path: "/opportunities", label: "Opportunities", icon: "◈" },
   { path: "/applications", label: "Applications", icon: "▤" },
   { path: "/truth-center", label: "Truth Center", icon: "✓" },

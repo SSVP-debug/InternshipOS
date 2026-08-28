@@ -1,10 +1,24 @@
 // work-authorization.ts
 // GET  /work-authorization  — returns the caller's own current WorkAuthorization
-//                              record, or 404 if none has been set yet.
+//                              record, or `{ work_authorization: null }` (HTTP 200)
+//                              if none has been set yet. Mirrors profile.ts's
+//                              GET /profile pattern exactly: a missing optional
+//                              singleton is a normal, successful "empty" result,
+//                              not a 404. (Previously this returned 404 for the
+//                              missing case — a genuine bug: the frontend's own
+//                              types/logic always expected `work_authorization:
+//                              WorkAuthorization | null` in a 200 response, and
+//                              the 404 surfaced literally as the error text
+//                              "work_authorization_not_found" on screen instead
+//                              of rendering an empty form. Fixed to match the
+//                              established singleton convention.)
 // POST /work-authorization  — CREATE the caller's WorkAuthorization record.
 //                              409 if one already exists (use PUT to update).
 // PUT  /work-authorization  — UPDATE the caller's existing WorkAuthorization
 //                              record. 404 if none exists yet (use POST to create).
+//                              This 404 is a genuine "update target doesn't
+//                              exist" business error, not the same case as GET's
+//                              — it is intentionally unchanged.
 //
 // Distinct POST/PUT semantics (rather than personal_info's single upsert)
 // because this task calls out "valid creation" and "update" as separate,
@@ -44,10 +58,9 @@ export function workAuthorizationRouter(): Router {
     if (error) {
       return res.status(400).json({ error: "work_authorization_fetch_failed", message: error.message });
     }
-    if (!data) {
-      return res.status(404).json({ error: "work_authorization_not_found" });
-    }
-    return res.status(200).json({ work_authorization: data });
+    // No row yet is a normal, successful empty state — same convention as
+    // GET /profile's `personal_info: null` — not a 404.
+    return res.status(200).json({ work_authorization: data ?? null });
   });
 
   router.post("/work-authorization", async (req: AuthedRequest, res) => {
