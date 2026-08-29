@@ -1,0 +1,26 @@
+{
+  // tsconfig.json's own "include" is ["src"] only — deliberately, since
+  // that's the config `npm run build` uses to produce dist/, and test
+  // files have no business being part of a production build. That meant
+  // `npx tsc --noEmit -p tsconfig.json` (used everywhere in this repo's
+  // CI and development workflow) never actually type-checked tests/ —
+  // vitest transpiles test files with esbuild, which strips types without
+  // checking them, so a real type error in a test file could sit
+  // unnoticed indefinitely. Found and fixed (tests/account.test.ts,
+  // tests/buildCandidateMatchInput.test.ts, tests/
+  // runMatchingForActiveCandidates.test.ts) during the P0/P1 automation
+  // work — see PROGRESS_SESSION.md section 1f/1g for the full story.
+  //
+  // This config exists specifically to close that gap: `npm run
+  // typecheck:tests` runs `src/` + `tests/` together (a test file
+  // importing something from src/ needs src/'s types in scope too, same
+  // reasoning as tsconfig.scripts.json's rootDir choice below), and is
+  // meant to be run alongside (not instead of) the existing `tsc --noEmit
+  // -p tsconfig.json` and `typecheck:scripts` checks.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true
+  },
+  "include": ["src", "tests"]
+}

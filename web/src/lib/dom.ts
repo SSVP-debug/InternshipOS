@@ -48,6 +48,24 @@ export function relativeDays(days: number): string {
   return `in ${days}d`;
 }
 
+// For past timestamps (e.g. "feed last updated 3h ago") — distinct from
+// relativeDays above, which is day-granularity and framed for
+// future/overdue deadlines, not "how long ago did this happen."
+export function relativeTimeAgo(dateStr: string | null | undefined): string {
+  if (!dateStr) return "never";
+  const d = new Date(dateStr);
+  if (Number.isNaN(d.getTime())) return "unknown";
+  const diffMs = Date.now() - d.getTime();
+  if (diffMs < 0) return "just now"; // clock skew / server time slightly ahead — don't show a negative age
+  const diffMin = Math.floor(diffMs / 60000);
+  if (diffMin < 1) return "just now";
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const diffHr = Math.floor(diffMin / 60);
+  if (diffHr < 24) return `${diffHr}h ago`;
+  const diffDay = Math.floor(diffHr / 24);
+  return `${diffDay}d ago`;
+}
+
 export function toast(message: string, tone: "success" | "error" = "success") {
   const el = h("div", { class: `toast toast--${tone}` }, [message]);
   document.body.append(el);

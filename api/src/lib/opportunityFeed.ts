@@ -10,6 +10,10 @@
 // and does NOT add any ranking beyond the deterministic ordering
 // specified below — match_score itself is Phase 2A's unmodified
 // matchEngine.ts output, already stored on the opportunity_match row.
+// It DOES do one additional thing beyond a pure join+sort: collapsing
+// obvious cross-source duplicates (see collapseDuplicateSources below) —
+// still a pure, deterministic transform of the same input data, not a
+// new ranking signal.
 
 export interface OpportunityMatchRow {
   id: string;
@@ -56,6 +60,73 @@ export interface OpportunityFeedItem {
   inbox_status: "new" | "saved" | "dismissed";
   is_priority: boolean;
   promoted_opportunity_id: string | null;
+  // How many other opportunity_source rows this item absorbed as
+  // cross-source duplicates (see collapseDuplicateSources below). 0 for
+  // the common case of a listing with no detected duplicate.
+  duplicate_source_count: number;
+}
+
+/**
+ * Cross-source duplicate collapsing (P2 follow-up to the original audit,
+ * which explicitly deferred real entity resolution as "genuinely separate
+ * work"). Adzuna and RemoteOK write independent opportunity_source rows
+ * even when they're advertising the literal same internship — ingestion's
+ * own dedup (dedupFingerprint.ts) is deliberately per-source only, keyed
+ * on each source's own reference id, which naturally differs across
+ * sources for the same real-world posting.
+ *
+ * This collapses OBVIOUS duplicates at feed-build time instead, and is
+ * deliberately conservative: it only merges two items when title,
+ * company, AND location all normalize identically. That's a strict AND,
+ * not a fuzzy match — "Bengaluru" vs "Bangalore," or two internships with
+ * the same title at the same company in different cities, are NOT
+ * collapsed. The trade-off is intentional: occasionally showing a real
+ * duplicate is a much smaller cost than ever hiding a genuinely distinct
+ * opening from a candidate's feed. This is not a replacement for real
+ * entity resolution (fuzzy text matching, location canonicalization) —
+ * that remains a separate, bigger piece of work, deliberately out of
+ * scope here.
+ */
+const COMPANY_SUFFIX_RE = /\b(inc|llc|ltd|limited|corp|corporation|co|pvt|private)\b\.?/g;
+
+/** Exported for direct unit testing — not otherwise part of this module's public API. */
+export function normalizeForDedup(value: string | null): string {
+  return (value ?? "")
+    .toLowerCase()
+    .replace(COMPANY_SUFFIX_RE, "")
+    .replace(/[.,'"()]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function duplicateKey(item: OpportunityFeedItem): string {
+  return `${normalizeForDedup(item.title)}|${normalizeForDedup(item.company)}|${normalizeForDedup(item.location)}`;
+}
+
+/**
+ * Collapses items whose (title, company, location) all normalize
+ * identically, keeping the first occurrence per key. Callers are expected
+ * to pass an already-sorted array (highest match_score first) — the
+ * surviving item is always the first one seen for its key, so sorting
+ * before collapsing (not after) determines which of the duplicates
+ * "wins" and gets shown. Does not otherwise reorder anything.
+ */
+function collapseDuplicateSources(items: OpportunityFeedItem[]): OpportunityFeedItem[] {
+  const seen = new Map<string, OpportunityFeedItem>();
+  const order: string[] = [];
+
+  for (const item of items) {
+    const key = duplicateKey(item);
+    const existing = seen.get(key);
+    if (!existing) {
+      seen.set(key, { ...item, duplicate_source_count: 0 });
+      order.push(key);
+    } else {
+      existing.duplicate_source_count += 1;
+    }
+  }
+
+  return order.map((key) => seen.get(key)!);
 }
 
 /**
@@ -132,6 +203,7 @@ export function buildOpportunityFeed(
       inbox_status: match.inbox_status,
       is_priority: match.is_priority,
       promoted_opportunity_id: match.promoted_opportunity_id,
+      duplicate_source_count: 0,
     });
   }
 
@@ -147,5 +219,7 @@ export function buildOpportunityFeed(
     return a.opportunity_source_id.localeCompare(b.opportunity_source_id); // ascending tie-breaker
   });
 
-  return items;
+  // Collapsing runs AFTER sorting — see collapseDuplicateSources's own
+  // comment for why sort order determines which duplicate survives.
+  return collapseDuplicateSources(items);
 }

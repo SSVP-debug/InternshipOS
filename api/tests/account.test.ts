@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { Response } from "express";
 import type { AuthedRequest } from "../src/middleware/auth.js";
+import { loadEnv } from "../src/lib/env.js";
 
 // account.ts imports adminClient from supabaseClient.js and calls it
 // (adminClient(env)) inside the DELETE /account handler. Mocking the whole
@@ -26,13 +27,20 @@ interface RouteLayer {
 }
 
 function getHandlers(method: "get" | "delete", path: string) {
-  const router = accountRouter({
-    SUPABASE_URL: "https://example.supabase.co",
-    SUPABASE_ANON_KEY: "anon-key",
-    SUPABASE_SERVICE_ROLE_KEY: "service-role-key",
-    PORT: 3000,
-    CONSENT_POLICY_VERSION: "v1.0",
-  }) as unknown as { stack: RouteLayer[] };
+  // loadEnv() (not a hand-typed partial literal) so this never drifts out
+  // of sync with Env's actual required fields again — this is exactly the
+  // kind of drift that went unnoticed because tests/ isn't covered by any
+  // tsc invocation (see PROGRESS_SESSION.md 1f); using the same
+  // already-established pattern as app.test.ts closes that gap here.
+  const router = accountRouter(
+    loadEnv({
+      SUPABASE_URL: "https://example.supabase.co",
+      SUPABASE_ANON_KEY: "anon-key",
+      SUPABASE_SERVICE_ROLE_KEY: "service-role-key",
+      PORT: "3000",
+      CONSENT_POLICY_VERSION: "v1.0",
+    } as NodeJS.ProcessEnv)
+  ) as unknown as { stack: RouteLayer[] };
   const layer = router.stack.find((l) => l.route?.path === path && l.route?.methods[method]);
   if (!layer?.route) throw new Error(`no route registered for ${method.toUpperCase()} ${path}`);
   return layer.route.stack.map((s) => s.handle);

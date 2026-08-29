@@ -1,4 +1,4 @@
-import { h, formatDate, relativeDays, errorMessage } from "../lib/dom";
+import { h, formatDate, relativeDays, relativeTimeAgo, errorMessage } from "../lib/dom";
 import { renderShell } from "../lib/shell";
 import { getToday, type TodayActionItem, type TodayView } from "../lib/api";
 import { navigate } from "../lib/router";
@@ -66,7 +66,24 @@ export async function renderToday(root: HTMLElement) {
   // personalized opportunity feed (Phase 2B) — no save/dismiss/priority/
   // apply actions here, only enough to say "you have new matches" and
   // send them to /feed, which remains the one place to act on them.
-  main.append(h("h2", { class: "section-title" }, ["New matches"]));
+  // feed_summary: a small, read-only pointer at the candidate's
+  // personalized opportunity feed (Phase 2B) — no save/dismiss/priority/
+  // apply actions here, only enough to say "you have new matches" and
+  // send them to /feed, which remains the one place to act on them.
+  // last_ingested_at is a trust signal for the daily automation
+  // (.github/workflows/daily-pipeline.yml) — "is the catalog actually
+  // being kept fresh," independent of whether it's found this candidate
+  // a match yet.
+  main.append(
+    h("div", { class: "page-header" }, [
+      h("h2", { class: "section-title", style: "margin:0" }, ["New matches"]),
+      h("span", { class: "subtle" }, [
+        view.feed_summary.last_ingested_at === null
+          ? "Catalog not yet refreshed"
+          : `Catalog refreshed ${relativeTimeAgo(view.feed_summary.last_ingested_at)}`,
+      ]),
+    ]),
+  );
   if (view.feed_summary.top_matches.length === 0) {
     main.append(
       h("div", { class: "empty" }, [

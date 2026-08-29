@@ -58,6 +58,7 @@ function queryResult(data: unknown, error: { message: string } | null = null) {
   builder.eq = self;
   builder.in = self;
   builder.order = self;
+  builder.limit = self;
   builder.single = async () => result;
   builder.then = (resolve: (v: typeof result) => unknown) => Promise.resolve(result).then(resolve);
   return builder;
@@ -96,6 +97,7 @@ function makeSupabaseMock(
     opportunities?: { data: unknown; error: { message: string } | null };
     matches?: { data: unknown; error: { message: string } | null };
     sources?: { data: unknown; error: { message: string } | null };
+    freshness?: { data: unknown; error: { message: string } | null };
   } = {},
 ) {
   const {
@@ -104,6 +106,7 @@ function makeSupabaseMock(
     opportunities = { data: [], error: null },
     matches = { data: [NEW_MATCH_ROW], error: null },
     sources = { data: [ACTIVE_SOURCE_ROW], error: null },
+    freshness = { data: [{ last_seen_at: "2026-08-29T09:00:00Z" }], error: null },
   } = opts;
 
   const from = (table: string) => {
@@ -113,7 +116,16 @@ function makeSupabaseMock(
     if (table === "application") return { select: () => queryResult(applications.data, applications.error) };
     if (table === "opportunity") return { select: () => queryResult(opportunities.data, opportunities.error) };
     if (table === "opportunity_match") return { select: () => queryResult(matches.data, matches.error) };
-    if (table === "opportunity_source") return { select: () => queryResult(sources.data, sources.error) };
+    if (table === "opportunity_source") {
+      // Two distinct queries against this table (see today.ts): the
+      // freshness fetch selects only "last_seen_at"; the per-match-source
+      // fetch selects the full OPPORTUNITY_SOURCE_COLUMNS list. Dispatch
+      // on the columns string so each gets its own mock data.
+      return {
+        select: (cols: string) =>
+          cols === "last_seen_at" ? queryResult(freshness.data, freshness.error) : queryResult(sources.data, sources.error),
+      };
+    }
     return queryResult([], null);
   };
 
@@ -129,13 +141,16 @@ describe("GET /today — feed_summary wiring", () => {
     await runRoute(getHandlers("get", "/today"), req, res);
 
     expect(res.status).toHaveBeenCalledWith(200);
-    const body = res.body as { feed_summary: { new_matches_count: number; top_matches: unknown[] } };
+    const body = res.body as {
+      feed_summary: { new_matches_count: number; top_matches: unknown[]; last_ingested_at: string | null };
+    };
     expect(body.feed_summary.new_matches_count).toBe(1);
     expect(body.feed_summary.top_matches).toHaveLength(1);
     expect((body.feed_summary.top_matches[0] as { title: string }).title).toBe("Backend Engineering Intern");
+    expect(body.feed_summary.last_ingested_at).toBe("2026-08-29T09:00:00Z");
   });
 
-  it("feed_summary is empty (not an error) when the candidate has zero opportunity_match rows", async () => {
+  it("feed_summary is empty but last_ingested_at is still populated when the candidate has zero opportunity_match rows", async () => {
     const supabase = makeSupabaseMock({ matches: { data: [], error: null } });
     const req = { supabase } as unknown as AuthedRequest;
     const res = makeRes();
@@ -143,12 +158,41 @@ describe("GET /today — feed_summary wiring", () => {
     await runRoute(getHandlers("get", "/today"), req, res);
 
     expect(res.status).toHaveBeenCalledWith(200);
-    const body = res.body as { feed_summary: { new_matches_count: number; top_matches: unknown[] } };
-    expect(body.feed_summary).toEqual({ new_matches_count: 0, top_matches: [] });
+    const body = res.body as {
+      feed_summary: { new_matches_count: number; top_matches: unknown[]; last_ingested_at: string | null };
+    };
+    expect(body.feed_summary).toEqual({
+      new_matches_count: 0,
+      top_matches: [],
+      last_ingested_at: "2026-08-29T09:00:00Z",
+    });
   });
 
-  it("does not fetch opportunity_source at all when there are zero matches (no wasted query)", async () => {
-    const sourceSelect = vi.fn(() => queryResult([], null));
+  it("last_ingested_at is null (not an error) when ingestion has never produced any visible opportunity_source row", async () => {
+    const supabase = makeSupabaseMock({ freshness: { data: [], error: null } });
+    const req = { supabase } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("get", "/today"), req, res);
+
+    expect(res.status).toHaveBeenCalledWith(200);
+    const body = res.body as { feed_summary: { last_ingested_at: string | null } };
+    expect(body.feed_summary.last_ingested_at).toBeNull();
+  });
+
+  it("returns 400 when the freshness fetch itself fails", async () => {
+    const supabase = makeSupabaseMock({ freshness: { data: null, error: { message: "db unreachable" } } });
+    const req = { supabase } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("get", "/today"), req, res);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect((res.body as { error: string }).error).toBe("today_fetch_failed");
+  });
+
+  it("with zero matches, opportunity_source is queried once for freshness only — never for the full per-match column list", async () => {
+    const sourceSelect = vi.fn((cols: string) => queryResult(cols === "last_seen_at" ? [{ last_seen_at: "2026-08-29T09:00:00Z" }] : [], null));
     const supabase = makeSupabaseMock({ matches: { data: [], error: null } });
     const originalFrom = supabase.from;
     supabase.from = (table: string) => {
@@ -160,7 +204,8 @@ describe("GET /today — feed_summary wiring", () => {
 
     await runRoute(getHandlers("get", "/today"), req, res);
 
-    expect(sourceSelect).not.toHaveBeenCalled();
+    expect(sourceSelect).toHaveBeenCalledTimes(1);
+    expect(sourceSelect).toHaveBeenCalledWith("last_seen_at");
   });
 
   it("returns 400 (not a partial/degraded 200) when the opportunity_match fetch fails", async () => {

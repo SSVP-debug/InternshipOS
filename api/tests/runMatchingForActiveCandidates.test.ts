@@ -74,7 +74,26 @@ function mockSupabase(options: {
       };
     }
 
-    // skill / education / experience / project / work_authorization / opportunity_source
+    // opportunity_source is queried with .eq("status","active") once per
+    // candidate, independent of candidate_id — give it one active
+    // opportunity so every candidate actually evaluates something.
+    // Inlined directly here (not a separate .mockImplementation()
+    // override) — a second vi.fn() implementation with a differently-
+    // shaped return value gets type-checked against the first
+    // implementation's inferred return type, which doesn't unify cleanly;
+    // one function with every branch avoids that entirely.
+    if (table === "opportunity_source") {
+      return {
+        select: vi.fn(() => ({
+          eq: vi.fn(async (_col: string, _val: string) => ({
+            data: [UNENRICHED_OPPORTUNITY_ROW],
+            error: null,
+          })),
+        })),
+      };
+    }
+
+    // skill / education / experience / project / work_authorization
     return {
       select: vi.fn(() => ({
         eq: vi.fn((col: string, val: string) => {
@@ -94,24 +113,6 @@ function mockSupabase(options: {
         }),
       })),
     };
-  });
-
-  // opportunity_source is queried with .eq("status","active") once per
-  // candidate, independent of candidate_id — give it one active opportunity
-  // so every candidate actually evaluates something.
-  const originalFrom = from.getMockImplementation()!;
-  from.mockImplementation((table: string) => {
-    if (table === "opportunity_source") {
-      return {
-        select: vi.fn(() => ({
-          eq: vi.fn(async (_col: string, _val: string) => ({
-            data: [UNENRICHED_OPPORTUNITY_ROW],
-            error: null,
-          })),
-        })),
-      };
-    }
-    return originalFrom(table);
   });
 
   return { from } as any;

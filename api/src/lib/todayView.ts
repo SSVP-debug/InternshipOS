@@ -54,6 +54,14 @@ export interface TodayViewInput {
   // ordering buildOpportunityFeed() itself guarantees — this function does
   // not re-sort.
   feedItems?: OpportunityFeedItem[];
+  // Optional — the most recent opportunity_source.last_seen_at the caller
+  // can see (RLS-scoped to active rows; see today.ts). A simple, honest
+  // "when did the catalog last get fresh data" signal, computed from data
+  // that already exists (no new migration) — not a per-candidate value,
+  // since ingestion is global/shared across every candidate, not
+  // personalized. Null when there is no visible opportunity_source data
+  // yet (e.g. ingestion has never run).
+  lastIngestedAt?: string | null;
   /** Caller's current date/time. Injected (not `new Date()` internally) so tests are deterministic. */
   now: Date;
 }
@@ -130,6 +138,11 @@ export interface TodayFeedSummary {
   // the candidate's attention today, it's already resolved.
   new_matches_count: number;
   top_matches: TodayFeedHighlight[];
+  // See TodayViewInput.lastIngestedAt — passed through unchanged, not
+  // recomputed here. Null means "no visible opportunity_source data yet,"
+  // not "unknown" — the frontend can render that as "not yet run" rather
+  // than a loading/error state.
+  last_ingested_at: string | null;
 }
 
 export interface TodayView {
@@ -152,7 +165,7 @@ export interface TodayView {
 
 const TOP_FEED_MATCHES_LIMIT = 3;
 
-function summarizeFeedForToday(feedItems: OpportunityFeedItem[]): TodayFeedSummary {
+function summarizeFeedForToday(feedItems: OpportunityFeedItem[], lastIngestedAt: string | null): TodayFeedSummary {
   // Matches already promoted into an application, or already resolved as
   // ineligible, don't need to surface here — this section exists to
   // prompt "you have something new to look at," not to duplicate the
@@ -175,10 +188,16 @@ function summarizeFeedForToday(feedItems: OpportunityFeedItem[]): TodayFeedSumma
     eligibility_status: item.eligibility_status,
   }));
 
-  return { new_matches_count: newMatchesCount, top_matches: topMatches };
+  return { new_matches_count: newMatchesCount, top_matches: topMatches, last_ingested_at: lastIngestedAt };
 }
 
-export function buildTodayView({ applications, opportunities, feedItems = [], now }: TodayViewInput): TodayView {
+export function buildTodayView({
+  applications,
+  opportunities,
+  feedItems = [],
+  lastIngestedAt = null,
+  now,
+}: TodayViewInput): TodayView {
   const today = toDateOnly(now);
   const opportunityById = new Map(opportunities.map((o) => [o.id, o]));
   const opportunityIdsWithApplication = new Set(applications.map((a) => a.opportunity_id));
@@ -298,7 +317,7 @@ export function buildTodayView({ applications, opportunities, feedItems = [], no
     saved_opportunities: savedOpportunities,
     recently_applied: recentlyApplied,
     pipeline_summary: pipelineSummary,
-    feed_summary: summarizeFeedForToday(feedItems),
+    feed_summary: summarizeFeedForToday(feedItems, lastIngestedAt),
     stats: {
       total_applications: applications.length,
       active_applications: activeApplications,

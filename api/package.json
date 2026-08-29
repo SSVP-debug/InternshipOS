@@ -10,6 +10,7 @@
     "start": "node dist/server.js",
     "test": "vitest run",
     "typecheck:scripts": "tsc --noEmit -p tsconfig.scripts.json",
+    "typecheck:tests": "tsc --noEmit -p tsconfig.tests.json",
     "smoke:prod": "tsx scripts/smoke-prod.ts",
     "ingest": "tsx scripts/ingest.ts",
     "match": "tsx scripts/run-matching.ts",

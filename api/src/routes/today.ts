@@ -17,6 +17,18 @@
 // fetches failing as fatal, and there's no clean way to report "Today
 // mostly loaded but the feed section silently didn't" without it reading
 // as broken rather than genuinely partial.
+//
+// Also fetches a single MAX(last_seen_at)-equivalent row from
+// opportunity_source (RLS-scoped to active rows, same as the feed fetch
+// above) to answer "when did the catalog last get fresh data" — a small,
+// honest freshness signal for the daily-automation work
+// (.github/workflows/daily-pipeline.yml), using a column that already
+// exists rather than a new migration/run-log table. This is global, not
+// per-candidate (ingestion is shared across every candidate), and is
+// deliberately NOT gated behind "does this candidate have any matches" —
+// even a brand-new candidate with zero matches should be able to see
+// "the catalog itself is being kept fresh," which is reassuring on its
+// own regardless of whether it's found them a match yet.
 
 import { Router } from "express";
 import type { AuthedRequest } from "../middleware/auth.js";
@@ -39,7 +51,7 @@ export function todayRouter(): Router {
       return res.status(404).json({ error: "candidate_not_found" });
     }
 
-    const [applicationsResult, opportunitiesResult, matchResult] = await Promise.all([
+    const [applicationsResult, opportunitiesResult, matchResult, freshnessResult] = await Promise.all([
       supabase
         .from("application")
         .select("id, opportunity_id, status, applied_at, deadline_override, next_action_date, next_action_note, updated_at"),
@@ -51,6 +63,12 @@ export function todayRouter(): Router {
         .select(OPPORTUNITY_MATCH_COLUMNS)
         .eq("candidate_id", candidate.id)
         .order("match_score", { ascending: false }),
+      supabase
+        .from("opportunity_source")
+        .select("last_seen_at")
+        .eq("status", "active")
+        .order("last_seen_at", { ascending: false })
+        .limit(1),
     ]);
 
     if (applicationsResult.error) {
@@ -61,6 +79,9 @@ export function todayRouter(): Router {
     }
     if (matchResult.error) {
       return res.status(400).json({ error: "today_fetch_failed", message: matchResult.error.message });
+    }
+    if (freshnessResult.error) {
+      return res.status(400).json({ error: "today_fetch_failed", message: freshnessResult.error.message });
     }
 
     const matches = (matchResult.data ?? []) as unknown as OpportunityMatchRow[];
@@ -80,10 +101,14 @@ export function todayRouter(): Router {
       sources = (sourceData ?? []) as unknown as OpportunitySourceRow[];
     }
 
+    const freshnessRows = (freshnessResult.data ?? []) as unknown as Array<{ last_seen_at: string | null }>;
+    const lastIngestedAt = freshnessRows[0]?.last_seen_at ?? null;
+
     const view = buildTodayView({
       applications: (applicationsResult.data ?? []) as ApplicationRow[],
       opportunities: (opportunitiesResult.data ?? []) as OpportunityRow[],
       feedItems: buildOpportunityFeed(matches, sources),
+      lastIngestedAt,
       now: new Date(),
     });
 

@@ -435,6 +435,7 @@ export interface TodayFeedHighlight {
 export interface TodayFeedSummary {
   new_matches_count: number;
   top_matches: TodayFeedHighlight[];
+  last_ingested_at: string | null;
 }
 export interface TodayView {
   generated_at: string;
@@ -483,6 +484,11 @@ export interface OpportunityFeedItem {
   // into a tracked application (see updateOpportunityMatchInbox below and
   // the Apply flow in pages/opportunityFeed.ts). Null until then.
   promoted_opportunity_id: string | null;
+  // How many other sources (e.g. the same internship on both Adzuna and
+  // RemoteOK) got collapsed into this one card. 0 for the common case.
+  // See api's opportunityFeed.ts (collapseDuplicateSources) for how
+  // conservative this detection is.
+  duplicate_source_count: number;
 }
 export interface OpportunityFeedView {
   generated_at: string;

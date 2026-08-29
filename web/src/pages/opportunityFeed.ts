@@ -158,6 +158,11 @@ export async function renderOpportunityFeed(root: HTMLElement) {
           h("div", { class: "list-row__meta" }, [
             `Match score: ${item.match_score}/100${item.posted_date ? ` · Posted ${formatDate(item.posted_date)}` : ""}`,
           ]),
+          item.duplicate_source_count > 0
+            ? h("div", { class: "subtle" }, [
+                `Also listed on ${item.duplicate_source_count} other source${item.duplicate_source_count === 1 ? "" : "s"}`,
+              ])
+            : null,
           ...explanation,
         ]),
         h("div", { class: "btn-row" }, [

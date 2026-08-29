@@ -91,6 +91,12 @@ describe("buildCandidateMatchInput", () => {
   });
 
   it("passes enum values through unchanged (degree_type, enrollment_status, employment_type, work auth status)", () => {
+    // "research" here, not "co_op" — experience.employment_type's real DB
+    // constraint (0011_experience.sql) is internship/part_time/full_time/
+    // research/volunteer. "co_op" is only valid for opportunity(_source)
+    // .employment_type (job postings, 0017/0022), a deliberately
+    // different enum for a different table — using it here would test an
+    // impossible experience row.
     const result = buildCandidateMatchInput({
       skills: [],
       education: [
@@ -102,14 +108,14 @@ describe("buildCandidateMatchInput", () => {
           is_primary: false,
         },
       ],
-      experience: [{ employment_type: "co_op", is_current: true }],
+      experience: [{ employment_type: "research", is_current: true }],
       projects: [],
       workAuthorization: { status: "needs_sponsorship", requires_sponsorship: true, citizenship_country: "NG" },
     });
 
     expect(result.education[0].degreeType).toBe("master");
     expect(result.education[0].enrollmentStatus).toBe("graduated");
-    expect(result.experience[0].employmentType).toBe("co_op");
+    expect(result.experience[0].employmentType).toBe("research");
     expect(result.workAuthorization?.status).toBe("needs_sponsorship");
   });
 

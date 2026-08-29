@@ -269,13 +269,14 @@ describe("buildTodayView — feed_summary", () => {
       inbox_status: "new",
       is_priority: false,
       promoted_opportunity_id: null,
+      duplicate_source_count: 0,
       ...overrides,
     };
   }
 
   it("defaults to an empty feed_summary when feedItems is omitted entirely", () => {
     const view = buildTodayView({ applications: [], opportunities: [], now: NOW });
-    expect(view.feed_summary).toEqual({ new_matches_count: 0, top_matches: [] });
+    expect(view.feed_summary).toEqual({ new_matches_count: 0, top_matches: [], last_ingested_at: null });
   });
 
   it("counts only 'new' inbox_status matches toward new_matches_count", () => {
@@ -330,5 +331,26 @@ describe("buildTodayView — feed_summary", () => {
       match_score: 55,
       eligibility_status: "unknown",
     });
+  });
+
+  it("defaults last_ingested_at to null when the caller omits it entirely", () => {
+    const view = buildTodayView({ applications: [], opportunities: [], now: NOW });
+    expect(view.feed_summary.last_ingested_at).toBeNull();
+  });
+
+  it("passes lastIngestedAt through unchanged — not recomputed from feedItems", () => {
+    const view = buildTodayView({
+      applications: [],
+      opportunities: [],
+      feedItems: [feedItem({ opportunity_match_id: "m1" })],
+      lastIngestedAt: "2026-08-29T09:00:00Z",
+      now: NOW,
+    });
+    expect(view.feed_summary.last_ingested_at).toBe("2026-08-29T09:00:00Z");
+  });
+
+  it("an explicit null lastIngestedAt (ingestion has never run) is preserved, not silently swapped for a default", () => {
+    const view = buildTodayView({ applications: [], opportunities: [], lastIngestedAt: null, now: NOW });
+    expect(view.feed_summary.last_ingested_at).toBeNull();
   });
 });

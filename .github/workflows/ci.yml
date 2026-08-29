@@ -39,6 +39,9 @@ jobs:
       - name: Type-check (tsc --noEmit)
         run: npx tsc --noEmit
 
+      - name: Type-check test files (tsconfig.tests.json — see its own comment)
+        run: npm run typecheck:tests
+
   web-build:
     name: Frontend build + type-check
     runs-on: ubuntu-latest

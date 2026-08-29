@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildOpportunityFeed } from "../src/lib/opportunityFeed.js";
+import { buildOpportunityFeed, normalizeForDedup } from "../src/lib/opportunityFeed.js";
 import type { OpportunityMatchRow, OpportunitySourceRow } from "../src/lib/opportunityFeed.js";
 
 function matchRow(overrides: Partial<OpportunityMatchRow> = {}): OpportunityMatchRow {
@@ -53,7 +53,11 @@ describe("buildOpportunityFeed", () => {
         matchRow({ id: "m-high", opportunity_source_id: "s2", match_score: 90 }),
         matchRow({ id: "m-mid", opportunity_source_id: "s3", match_score: 60 }),
       ],
-      [sourceRow({ id: "s1" }), sourceRow({ id: "s2" }), sourceRow({ id: "s3" })]
+      [
+        sourceRow({ id: "s1", title: "Frontend Intern", company: "Low Co" }),
+        sourceRow({ id: "s2", title: "Backend Intern", company: "High Co" }),
+        sourceRow({ id: "s3", title: "Data Intern", company: "Mid Co" }),
+      ]
     );
 
     expect(items.map((i) => i.opportunity_match_id)).toEqual(["m-high", "m-mid", "m-low"]);
@@ -67,9 +71,9 @@ describe("buildOpportunityFeed", () => {
         matchRow({ id: "m-new", opportunity_source_id: "s-new", match_score: 50 }),
       ],
       [
-        sourceRow({ id: "s-null", posted_date: null }),
-        sourceRow({ id: "s-old", posted_date: "2026-01-01" }),
-        sourceRow({ id: "s-new", posted_date: "2026-08-01" }),
+        sourceRow({ id: "s-null", title: "Null-date Intern", company: "Null Co", posted_date: null }),
+        sourceRow({ id: "s-old", title: "Old Intern", company: "Old Co", posted_date: "2026-01-01" }),
+        sourceRow({ id: "s-new", title: "New Intern", company: "New Co", posted_date: "2026-08-01" }),
       ]
     );
 
@@ -83,8 +87,8 @@ describe("buildOpportunityFeed", () => {
         matchRow({ id: "m-a", opportunity_source_id: "source-a", match_score: 50 }),
       ],
       [
-        sourceRow({ id: "source-b", posted_date: "2026-08-01" }),
-        sourceRow({ id: "source-a", posted_date: "2026-08-01" }),
+        sourceRow({ id: "source-b", title: "Role B", company: "Company B", posted_date: "2026-08-01" }),
+        sourceRow({ id: "source-a", title: "Role A", company: "Company A", posted_date: "2026-08-01" }),
       ]
     );
 
@@ -167,5 +171,122 @@ describe("buildOpportunityFeed", () => {
       [sourceRow({ id: "source-1" })]
     );
     expect(applied[0].promoted_opportunity_id).toBe("app-opp-1");
+  });
+
+  it("a fresh item with no cross-source duplicate has duplicate_source_count 0", () => {
+    const items = buildOpportunityFeed([matchRow()], [sourceRow({ id: "source-1" })]);
+    expect(items[0].duplicate_source_count).toBe(0);
+  });
+});
+
+describe("buildOpportunityFeed — cross-source duplicate collapsing", () => {
+  it("collapses two sources whose title/company/location all normalize identically, keeping the higher-scoring one", () => {
+    const items = buildOpportunityFeed(
+      [
+        matchRow({ id: "m-adzuna", opportunity_source_id: "adzuna-1", match_score: 60 }),
+        matchRow({ id: "m-remoteok", opportunity_source_id: "remoteok-1", match_score: 85 }),
+      ],
+      [
+        sourceRow({ id: "adzuna-1", title: "Backend Engineering Intern", company: "Acme Corp", location: "Remote" }),
+        sourceRow({ id: "remoteok-1", title: "Backend Engineering Intern", company: "Acme Corp", location: "Remote" }),
+      ]
+    );
+
+    expect(items).toHaveLength(1);
+    expect(items[0].opportunity_match_id).toBe("m-remoteok"); // higher score survives
+    expect(items[0].duplicate_source_count).toBe(1);
+  });
+
+  it("is case/whitespace/punctuation insensitive and strips common company suffixes", () => {
+    const items = buildOpportunityFeed(
+      [
+        matchRow({ id: "m1", opportunity_source_id: "s1", match_score: 50 }),
+        matchRow({ id: "m2", opportunity_source_id: "s2", match_score: 40 }),
+      ],
+      [
+        sourceRow({ id: "s1", title: "  Backend Engineering Intern  ", company: "Acme Corp, Inc." }),
+        sourceRow({ id: "s2", title: "backend engineering intern", company: "ACME CORP" }),
+      ]
+    );
+
+    expect(items).toHaveLength(1);
+    expect(items[0].duplicate_source_count).toBe(1);
+  });
+
+  it("does NOT collapse the same title+company in two different locations — conservative by design", () => {
+    const items = buildOpportunityFeed(
+      [
+        matchRow({ id: "m1", opportunity_source_id: "s1", match_score: 50 }),
+        matchRow({ id: "m2", opportunity_source_id: "s2", match_score: 50 }),
+      ],
+      [
+        sourceRow({ id: "s1", title: "Backend Engineering Intern", company: "Acme Corp", location: "Bengaluru, India" }),
+        sourceRow({ id: "s2", title: "Backend Engineering Intern", company: "Acme Corp", location: "Mumbai, India" }),
+      ]
+    );
+
+    expect(items).toHaveLength(2);
+    expect(items.every((i) => i.duplicate_source_count === 0)).toBe(true);
+  });
+
+  it("does NOT collapse two different titles at the same company/location", () => {
+    const items = buildOpportunityFeed(
+      [
+        matchRow({ id: "m1", opportunity_source_id: "s1", match_score: 50 }),
+        matchRow({ id: "m2", opportunity_source_id: "s2", match_score: 50 }),
+      ],
+      [
+        sourceRow({ id: "s1", title: "Backend Engineering Intern", company: "Acme Corp" }),
+        sourceRow({ id: "s2", title: "Data Science Intern", company: "Acme Corp" }),
+      ]
+    );
+
+    expect(items).toHaveLength(2);
+  });
+
+  it("collapses three-way duplicates down to one item with duplicate_source_count 2", () => {
+    const items = buildOpportunityFeed(
+      [
+        matchRow({ id: "m1", opportunity_source_id: "s1", match_score: 30 }),
+        matchRow({ id: "m2", opportunity_source_id: "s2", match_score: 90 }),
+        matchRow({ id: "m3", opportunity_source_id: "s3", match_score: 60 }),
+      ],
+      [
+        sourceRow({ id: "s1", title: "Data Intern", company: "Zeta Labs", location: "Remote" }),
+        sourceRow({ id: "s2", title: "Data Intern", company: "Zeta Labs", location: "Remote" }),
+        sourceRow({ id: "s3", title: "Data Intern", company: "Zeta Labs", location: "Remote" }),
+      ]
+    );
+
+    expect(items).toHaveLength(1);
+    expect(items[0].opportunity_match_id).toBe("m2"); // highest score of the three
+    expect(items[0].duplicate_source_count).toBe(2);
+  });
+});
+
+describe("normalizeForDedup", () => {
+  it("lowercases and trims", () => {
+    expect(normalizeForDedup("  Backend Intern  ")).toBe("backend intern");
+  });
+
+  it("collapses internal whitespace runs to a single space", () => {
+    expect(normalizeForDedup("Backend    Engineering   Intern")).toBe("backend engineering intern");
+  });
+
+  it("strips common company legal suffixes (including when it means a bare name remains — that's intentional, so 'Acme Corp' and 'Acme Inc' both normalize to the same key)", () => {
+    expect(normalizeForDedup("Acme Corp, Inc.")).toBe("acme");
+    expect(normalizeForDedup("Nimbus Labs Pvt Ltd")).toBe("nimbus labs");
+  });
+
+  it("strips common punctuation, including when a suffix word is also stripped", () => {
+    expect(normalizeForDedup("O'Brien & Co.")).toBe("obrien &");
+  });
+
+  it("treats null as an empty string rather than throwing", () => {
+    expect(normalizeForDedup(null)).toBe("");
+  });
+
+  it("does not conflate two different real strings just because both are short", () => {
+    expect(normalizeForDedup("Acme")).not.toBe(normalizeForDedup("Zeta"));
   });
 });

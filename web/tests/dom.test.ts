@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { errorMessage } from "../src/lib/dom.js";
+import { describe, it, expect, vi } from "vitest";
+import { errorMessage, relativeTimeAgo } from "../src/lib/dom.js";
 
 // Regression coverage for the secondary finding in the profile-persistence
 // audit: every validation failure from the backend (education/skill/work-
@@ -70,5 +70,46 @@ describe("errorMessage — with Zod flatten() validation details", () => {
     expect(errorMessage({ message: "x", details: 42 })).toBe("x");
     expect(errorMessage({ message: "x", details: { fieldErrors: "not an object" } })).toBe("x");
     expect(errorMessage({ message: "x", details: { fieldErrors: { a: "not an array" } } })).toBe("x");
+  });
+});
+
+// relativeTimeAgo — powers the "Catalog refreshed Xh ago" freshness
+// signal on the Today page (see pages/today.ts), sourced from
+// opportunity_source.last_seen_at via GET /today's feed_summary. Frozen
+// "now" via fake timers so these assertions are deterministic rather than
+// depending on wall-clock time when the suite happens to run.
+describe("relativeTimeAgo", () => {
+  const NOW = new Date("2026-08-29T12:00:00Z");
+
+  it("returns 'never' for null/undefined — ingestion has not produced any visible data yet", () => {
+    expect(relativeTimeAgo(null)).toBe("never");
+    expect(relativeTimeAgo(undefined)).toBe("never");
+  });
+
+  it("returns 'unknown' for an unparseable date string rather than throwing or showing 'NaN ago'", () => {
+    expect(relativeTimeAgo("not-a-date")).toBe("unknown");
+  });
+
+  it("formats minutes, hours, and days ago correctly", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    try {
+      expect(relativeTimeAgo("2026-08-29T11:59:30Z")).toBe("just now"); // 30s ago
+      expect(relativeTimeAgo("2026-08-29T11:45:00Z")).toBe("15m ago");
+      expect(relativeTimeAgo("2026-08-29T09:00:00Z")).toBe("3h ago");
+      expect(relativeTimeAgo("2026-08-26T12:00:00Z")).toBe("3d ago");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("treats a timestamp slightly in the future (clock skew) as 'just now', not a negative age", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    try {
+      expect(relativeTimeAgo("2026-08-29T12:00:05Z")).toBe("just now");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
