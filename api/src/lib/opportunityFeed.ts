@@ -19,6 +19,11 @@ export interface OpportunityMatchRow {
   match_breakdown: unknown;
   inbox_status: "new" | "saved" | "dismissed";
   is_priority: boolean;
+  // Set by the candidate's Apply flow once they've turned this match into
+  // a tracked application (see opportunity-feed.ts's PATCH handler and
+  // the frontend's opportunityFeed.ts page). Null until then. Purely
+  // pass-through here — this module does not write it or infer it.
+  promoted_opportunity_id: string | null;
 }
 
 export interface OpportunitySourceRow {
@@ -50,6 +55,7 @@ export interface OpportunityFeedItem {
   match_unknown: string[];
   inbox_status: "new" | "saved" | "dismissed";
   is_priority: boolean;
+  promoted_opportunity_id: string | null;
 }
 
 /**
@@ -125,6 +131,7 @@ export function buildOpportunityFeed(
       match_unknown: unknown,
       inbox_status: match.inbox_status,
       is_priority: match.is_priority,
+      promoted_opportunity_id: match.promoted_opportunity_id,
     });
   }
 

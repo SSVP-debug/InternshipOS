@@ -467,6 +467,10 @@ export interface OpportunityFeedItem {
   match_unknown: string[];
   inbox_status: "new" | "saved" | "dismissed";
   is_priority: boolean;
+  // Set once the candidate has used the Apply button to turn this match
+  // into a tracked application (see updateOpportunityMatchInbox below and
+  // the Apply flow in pages/opportunityFeed.ts). Null until then.
+  promoted_opportunity_id: string | null;
 }
 export interface OpportunityFeedView {
   generated_at: string;
@@ -488,10 +492,19 @@ export interface OpportunityMatchRecord {
   match_breakdown: unknown;
   inbox_status: "new" | "saved" | "dismissed";
   is_priority: boolean;
+  promoted_opportunity_id: string | null;
 }
 export const updateOpportunityMatchInbox = (
   matchId: string,
-  data: { inbox_status?: OpportunityFeedItem["inbox_status"]; is_priority?: boolean },
+  data: {
+    inbox_status?: OpportunityFeedItem["inbox_status"];
+    is_priority?: boolean;
+    // Sent once, right after the Apply flow creates the candidate-owned
+    // opportunity/application rows for this match — the backend verifies
+    // (via RLS, see opportunity-feed.ts's route) that the referenced
+    // opportunity actually belongs to the caller before accepting it.
+    promoted_opportunity_id?: string;
+  },
 ) =>
   patch<{ opportunity_match: OpportunityMatchRecord }>(`/opportunity-matches/${matchId}/inbox`, data).then(
     (b) => b.opportunity_match,

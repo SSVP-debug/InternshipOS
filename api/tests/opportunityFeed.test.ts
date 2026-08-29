@@ -11,6 +11,7 @@ function matchRow(overrides: Partial<OpportunityMatchRow> = {}): OpportunityMatc
     match_breakdown: { breakdown: {}, reasons: [], missing: [], unknown: [] },
     inbox_status: "new",
     is_priority: false,
+    promoted_opportunity_id: null,
     ...overrides,
   };
 }
@@ -155,5 +156,16 @@ describe("buildOpportunityFeed", () => {
   it("never recomputes match_score — passes it through exactly as given", () => {
     const items = buildOpportunityFeed([matchRow({ match_score: 37.5 })], [sourceRow({ id: "source-1" })]);
     expect(items[0].match_score).toBe(37.5);
+  });
+
+  it("passes promoted_opportunity_id through unchanged — null when not yet applied, the id once it is", () => {
+    const untouched = buildOpportunityFeed([matchRow()], [sourceRow({ id: "source-1" })]);
+    expect(untouched[0].promoted_opportunity_id).toBeNull();
+
+    const applied = buildOpportunityFeed(
+      [matchRow({ promoted_opportunity_id: "app-opp-1" })],
+      [sourceRow({ id: "source-1" })]
+    );
+    expect(applied[0].promoted_opportunity_id).toBe("app-opp-1");
   });
 });

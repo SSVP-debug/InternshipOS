@@ -1,0 +1,102 @@
+name: Daily Opportunity Pipeline
+
+# P0 automation: runs opportunity ingestion, then matching for every
+# candidate, once a day — so the personalized feed (GET /opportunity-feed,
+# see api/src/routes/opportunity-feed.ts) reflects fresh opportunities
+# without a human running `npm run ingest` / `npm run match:all` by hand.
+#
+# Same free-tier posture as the rest of this repo's CI (see ci.yml,
+# supabase-keepalive.yml): GitHub Actions scheduled workflows cost
+# nothing on the plans this project runs on, and this job only ever
+# talks to Adzuna's API, RemoteOK's public feed, and this project's own
+# Supabase project — no other external services.
+#
+# Setup required (one-time, in the GitHub repo, not in code):
+#   Settings -> Secrets and variables -> Actions -> New repository secret
+#     SUPABASE_URL              = https://<your-project-ref>.supabase.co
+#     SUPABASE_SERVICE_ROLE_KEY = <service_role key from Supabase project settings>
+#     ADZUNA_APP_ID             = <from https://developer.adzuna.com/, optional>
+#     ADZUNA_APP_KEY            = <from https://developer.adzuna.com/, optional>
+#
+# ADZUNA_APP_ID / ADZUNA_APP_KEY are optional at the workflow level, same
+# as they are for a manual `npm run ingest` run: if unset, ingest.ts logs
+# that Adzuna was skipped for that run and RemoteOK still runs — see
+# adzunaAdapter.ts's readCredentials(). SUPABASE_URL and
+# SUPABASE_SERVICE_ROLE_KEY are required for both steps; their absence
+# fails the job immediately, before any step that would otherwise print a
+# less clear error.
+#
+# SECRET HANDLING: every credential is injected as a step-level `env:`
+# value from `secrets.*`, exactly as supabase-keepalive.yml already does.
+# Nothing in this workflow echoes a secret, builds a credential-bearing
+# URL for logging, or enables shell tracing (`set -x`) around a
+# credentialed step. ingest.ts's own adapter code additionally redacts
+# app_id/app_key from any error text it prints (see adzunaAdapter.ts) —
+# this workflow does not need to (and must not) do that redaction itself,
+# since the script output reaching these logs is already safe by
+# construction.
+
+on:
+  schedule:
+    - cron: "0 5 * * *" # daily at 05:00 UTC — before a typical India-morning check-in
+  workflow_dispatch: {} # allow manual trigger for testing and on-demand runs
+
+jobs:
+  daily-pipeline:
+    name: Ingest opportunities, then match every candidate
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: api
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: api/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify required secrets are set
+        run: |
+          if [ -z "${{ secrets.SUPABASE_URL }}" ] || [ -z "${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" ]; then
+            echo "::error::SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY repo secret is not set. See this workflow's header comment for setup steps."
+            exit 1
+          fi
+          if [ -z "${{ secrets.ADZUNA_APP_ID }}" ] || [ -z "${{ secrets.ADZUNA_APP_KEY }}" ]; then
+            echo "::warning::ADZUNA_APP_ID / ADZUNA_APP_KEY not set — the Adzuna source will be skipped for this run (RemoteOK still runs). This is not fatal."
+          fi
+
+      # Ingestion runs first — matching a candidate against opportunities
+      # this run just fetched requires them to already be written to
+      # public.opportunity_source. ingest.ts itself exits 1 only when
+      # EVERY configured source fails outright; a single-source failure
+      # (e.g. Adzuna down, RemoteOK fine) is reported in its own output
+      # but does not fail this step — see ingest.ts's own header comment
+      # for that exact, pre-existing precedent. This step failing (both
+      # sources down, or an unexpected crash) stops the job here, before
+      # matching ever runs.
+      - name: Ingest opportunities (npm run ingest)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          ADZUNA_APP_ID: ${{ secrets.ADZUNA_APP_ID }}
+          ADZUNA_APP_KEY: ${{ secrets.ADZUNA_APP_KEY }}
+        run: npm run ingest
+
+      # Matching runs second, only if ingestion did not fail outright
+      # (GitHub Actions stops the job on the previous step's non-zero
+      # exit by default — no `if:` needed here for that). match-all.ts
+      # exits 1 only when every candidate considered failed; a partial
+      # failure is logged (candidate id + message, no other candidate
+      # fields) but does not fail this step, mirroring ingest.ts's own
+      # partial-failure precedent exactly — see match-all.ts's header
+      # comment for the full exit-code rationale.
+      - name: Match every candidate (npm run match:all)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: npm run match:all

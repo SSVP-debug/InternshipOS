@@ -7,9 +7,23 @@
 // from running — each adapter's run()/write is wrapped independently.
 //
 // This module has no opinion on scheduling — it's called once per
-// invocation, by api/scripts/ingest.ts today. Wiring it to a cron/
-// scheduler is a later, separate milestone (explicitly out of scope
-// here per the task brief).
+// invocation, by api/scripts/ingest.ts (and, as of the P0 automation
+// phase, a scheduled GitHub Actions workflow — see
+// .github/workflows/daily-pipeline.yml — which simply runs the same
+// `npm run ingest` command a human already could).
+//
+// DEFENSIVE NOTE (P0 automation phase): both current adapters
+// (adzunaAdapter.ts, remoteokAdapter.ts) are written so their run()
+// method always resolves — every internal error is caught and reported
+// via AdapterRunResult.errors, never a rejected promise. The loop below
+// wraps `adapter.run()` in a try/catch anyway, purely as a structural
+// safety net: the SourceAdapter interface does not *guarantee* run()
+// never rejects, and a manual, human-attended run tolerated that gap
+// silently, but an unattended daily scheduled run should not let one
+// misbehaving adapter (present or future) take down every other source
+// for the day. Neither adapter's own code or behavior is changed by
+// this — a rejection is now reported exactly like any other adapter
+// error (fetched: 0, the error message in `errors`), not a crash.
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { createAdzunaAdapter } from "./adapters/adzunaAdapter.js";
@@ -29,7 +43,25 @@ export async function runIngestion(
   const sources: IngestionSummary["sources"] = [];
 
   for (const adapter of adapters) {
-    const runResult = await adapter.run();
+    let runResult: Awaited<ReturnType<SourceAdapter["run"]>>;
+    try {
+      runResult = await adapter.run();
+    } catch (error) {
+      // adapter.run() rejected instead of resolving with errors populated
+      // (see the DEFENSIVE NOTE above) — report it as a fully failed
+      // source, same shape as any other adapter error, and continue with
+      // the remaining adapters rather than aborting the whole run.
+      sources.push({
+        sourceName: adapter.sourceName,
+        fetched: 0,
+        keptAfterFilter: 0,
+        inserted: 0,
+        updated: 0,
+        failed: 0,
+        errors: [error instanceof Error ? error.message : String(error)],
+      });
+      continue;
+    }
 
     if (runResult.listings.length === 0) {
       sources.push({

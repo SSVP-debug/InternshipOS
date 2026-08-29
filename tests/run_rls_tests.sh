@@ -24,6 +24,9 @@ $PSQL_RUN -v ON_ERROR_STOP=1 -c "CREATE DATABASE ${DB_NAME};"
 echo "== Applying local auth shim (pre-migration half) =="
 $PSQL_RUN -v ON_ERROR_STOP=1 -d "$DB_NAME" -f "$ROOT_DIR/tests/local_auth_shim.sql"
 
+echo "== Applying local storage shim (pre-migration half) =="
+$PSQL_RUN -v ON_ERROR_STOP=1 -d "$DB_NAME" -f "$ROOT_DIR/tests/local_storage_shim.sql"
+
 echo "== Applying migrations =="
 for f in "$ROOT_DIR"/supabase/migrations/*.sql; do
   echo "  -> $f"
@@ -80,5 +83,11 @@ $PSQL_RUN -v ON_ERROR_STOP=1 -d "$DB_NAME" -f "$ROOT_DIR/tests/rls/test_applicat
 
 echo "== Running RLS/ownership test suite (Phase 1: application_note) =="
 $PSQL_RUN -v ON_ERROR_STOP=1 -d "$DB_NAME" -f "$ROOT_DIR/tests/rls/test_application_note_ownership.sql"
+
+echo "== Running RLS/access test suite (Phase 1A: opportunity_source) =="
+$PSQL_RUN -v ON_ERROR_STOP=1 -d "$DB_NAME" -f "$ROOT_DIR/tests/rls/test_opportunity_source_access.sql"
+
+echo "== Running RLS/ownership test suite (Phase 1A/2A: opportunity_match) =="
+$PSQL_RUN -v ON_ERROR_STOP=1 -d "$DB_NAME" -f "$ROOT_DIR/tests/rls/test_opportunity_match_ownership.sql"
 
 echo "== ALL TESTS PASSED =="

@@ -97,12 +97,14 @@ function makeSupabaseMock(opts: {
   matchList?: { data: unknown; error: { message: string } | null };
   sourceList?: { data: unknown; error: { message: string } | null };
   updateResult?: { data: unknown; error: { message: string } | null };
+  ownedOpportunity?: { data: unknown; error: { message: string } | null };
 } = {}) {
   const {
     candidate = { id: CANDIDATE_ID },
     matchList = { data: [MATCH_ROW], error: null },
     sourceList = { data: [ACTIVE_SOURCE_ROW], error: null },
     updateResult = { data: { ...MATCH_ROW, inbox_status: "saved" }, error: null },
+    ownedOpportunity = { data: { id: "owned-opportunity-1" }, error: null },
   } = opts;
 
   const fromSpy = vi.fn();
@@ -126,6 +128,9 @@ function makeSupabaseMock(opts: {
     }
     if (table === "opportunity_source") {
       return { select: () => queryResult(sourceList.data, sourceList.error) };
+    }
+    if (table === "opportunity") {
+      return { select: () => ({ eq: () => ({ maybeSingle: async () => ownedOpportunity }) }) };
     }
     return queryResult([], null);
   };
@@ -384,5 +389,89 @@ describe("PATCH /opportunity-matches/:id/inbox", () => {
     await runRoute(getHandlers("patch", "/opportunity-matches/:id/inbox"), req, res);
 
     expect(res.status).toHaveBeenCalledWith(400);
+  });
+
+  const OWNED_OPPORTUNITY_ID = "22222222-2222-2222-2222-222222222222";
+
+  it("accepts promoted_opportunity_id alone (no inbox_status/is_priority required)", async () => {
+    const supabase = makeSupabaseMock({
+      ownedOpportunity: { data: { id: OWNED_OPPORTUNITY_ID }, error: null },
+      updateResult: { data: { ...MATCH_ROW, promoted_opportunity_id: OWNED_OPPORTUNITY_ID }, error: null },
+    });
+    const req = {
+      supabase,
+      params: { id: MATCH_ID },
+      body: { promoted_opportunity_id: OWNED_OPPORTUNITY_ID },
+    } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("patch", "/opportunity-matches/:id/inbox"), req, res);
+
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(
+      (res.body as { opportunity_match: { promoted_opportunity_id: string } }).opportunity_match
+        .promoted_opportunity_id,
+    ).toBe(OWNED_OPPORTUNITY_ID);
+  });
+
+  it("rejects a promoted_opportunity_id that isn't a valid UUID with 400, before touching the database", async () => {
+    const supabase = makeSupabaseMock();
+    const req = {
+      supabase,
+      params: { id: MATCH_ID },
+      body: { promoted_opportunity_id: "not-a-uuid" },
+    } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("patch", "/opportunity-matches/:id/inbox"), req, res);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(supabase.fromSpy).not.toHaveBeenCalled();
+  });
+
+  it("rejects promoted_opportunity_id for an opportunity the candidate does not own (RLS returns no row) with 400, and never attempts the update", async () => {
+    const supabase = makeSupabaseMock({ ownedOpportunity: { data: null, error: null } });
+    const req = {
+      supabase,
+      params: { id: MATCH_ID },
+      body: { promoted_opportunity_id: OWNED_OPPORTUNITY_ID },
+    } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("patch", "/opportunity-matches/:id/inbox"), req, res);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect((res.body as { error: string }).error).toBe("invalid_promoted_opportunity_id");
+    expect(supabase.fromSpy).not.toHaveBeenCalledWith("opportunity_match");
+  });
+
+  it("surfaces a Supabase error on the opportunity ownership lookup as a 400, not a thrown/unhandled error", async () => {
+    const supabase = makeSupabaseMock({ ownedOpportunity: { data: null, error: { message: "timeout" } } });
+    const req = {
+      supabase,
+      params: { id: MATCH_ID },
+      body: { promoted_opportunity_id: OWNED_OPPORTUNITY_ID },
+    } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("patch", "/opportunity-matches/:id/inbox"), req, res);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect((res.body as { error: string }).error).toBe("promoted_opportunity_lookup_failed");
+  });
+
+  it("rejects an empty body with 400 — promoted_opportunity_id counts toward the 'at least one field' rule but an empty object still fails it", async () => {
+    const supabase = makeSupabaseMock();
+    const req = {
+      supabase,
+      params: { id: MATCH_ID },
+      body: {},
+    } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("patch", "/opportunity-matches/:id/inbox"), req, res);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(supabase.fromSpy).not.toHaveBeenCalled();
   });
 });

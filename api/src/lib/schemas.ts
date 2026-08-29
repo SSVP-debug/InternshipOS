@@ -300,10 +300,23 @@ export const OpportunityInboxUpdateSchema = z
   .object({
     inbox_status: z.enum(["new", "saved", "dismissed"]).optional(),
     is_priority: z.boolean().optional(),
+    // Set once, by the frontend's Apply flow (see opportunityFeed.ts page),
+    // right after it creates the candidate-owned `opportunity`/
+    // `application` rows for this match — records which of the
+    // candidate's own applications this specific match was promoted into.
+    // References public.opportunity(id) (0022_opportunity_intelligence_foundation.sql).
+    // Ownership of the referenced opportunity is checked in the route
+    // handler (not here — this schema only validates shape), the same
+    // "candidate_id belt-and-braces" posture used throughout this file.
+    promoted_opportunity_id: z.string().uuid().optional(),
   })
-  .refine((data) => data.inbox_status !== undefined || data.is_priority !== undefined, {
-    message: "at least one of inbox_status or is_priority must be provided",
-  });
+  .refine(
+    (data) =>
+      data.inbox_status !== undefined || data.is_priority !== undefined || data.promoted_opportunity_id !== undefined,
+    {
+      message: "at least one of inbox_status, is_priority, or promoted_opportunity_id must be provided",
+    },
+  );
 export type OpportunityInboxUpdate = z.infer<typeof OpportunityInboxUpdateSchema>;
 
 // ── Application (Phase 1) ────────────────────────────────────────────────

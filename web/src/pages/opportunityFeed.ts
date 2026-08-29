@@ -95,6 +95,23 @@ export async function renderOpportunityFeed(root: HTMLElement) {
           source: "job_board",
         });
         const application = await createApplication({ opportunity_id: created.id });
+
+        // Record which application this match was promoted into. This is
+        // provenance, not the primary action — the application above has
+        // already succeeded by this point, so a failure here is logged
+        // and shown as a soft, non-blocking note rather than treated as
+        // the apply attempt itself failing (the candidate should still
+        // land on their new application either way).
+        try {
+          const updated = await updateOpportunityMatchInbox(item.opportunity_match_id, {
+            promoted_opportunity_id: created.id,
+          });
+          item.promoted_opportunity_id = updated.promoted_opportunity_id;
+        } catch (linkErr) {
+          console.warn("Could not record promoted_opportunity_id on the match:", linkErr);
+          toast("Application created, but the feed card couldn't be marked as applied.", "error");
+        }
+
         toast("Application started.");
         navigate(`/applications/${application.id}`);
       } catch (err) {
@@ -152,7 +169,9 @@ export async function renderOpportunityFeed(root: HTMLElement) {
           h("button", { class: "btn btn--small", onClick: toggleDismiss }, [
             item.inbox_status === "dismissed" ? "Restore" : "Dismiss",
           ]),
-          h("button", { class: "btn btn--small btn--primary", onClick: apply }, ["Apply"]),
+          h("button", { class: "btn btn--small btn--primary", onClick: apply, disabled: item.promoted_opportunity_id !== null }, [
+            item.promoted_opportunity_id !== null ? "Applied" : "Apply",
+          ]),
         ]),
       ]),
     ]);

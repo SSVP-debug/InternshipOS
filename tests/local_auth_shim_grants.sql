@@ -53,11 +53,32 @@ grant select, insert on public.application_status_event to authenticated;
 -- Phase 1: Application notes grants (multi-row, editable, lightweight).
 grant select, insert, update, delete on public.application_note to authenticated;
 
--- anon gets nothing in Phase 0/1 — no unauthenticated read/write surface yet.
+-- Phase 1A/2A: Opportunity Intelligence grants (0022_opportunity_intelligence_foundation.sql).
+--
+-- opportunity_source: authenticated gets SELECT only — matches the RLS
+-- policy exactly (opportunity_source_select_active is a SELECT-only
+-- policy; there is deliberately no INSERT/UPDATE/DELETE policy for
+-- authenticated on this table, since only service-role ingestion ever
+-- writes to it). Granting insert/update/delete here would be misleading
+-- even though RLS would still block it (FORCE ROW LEVEL SECURITY with no
+-- matching policy denies by default) — the grant should describe the same
+-- surface the policy describes, not rely on RLS alone to hide an
+-- unintended grant.
+grant select on public.opportunity_source to authenticated;
+
+-- opportunity_match: candidate-owned, same full CRUD grant pattern as
+-- every other candidate-owned multi-row table (opportunity, education,
+-- skill, ...) — RLS's ownership-through-candidate policies do the actual
+-- per-row restriction.
+grant select, insert, update, delete on public.opportunity_match to authenticated;
+
+-- anon gets nothing in Phase 0/1/2 — no unauthenticated read/write surface yet.
 
 -- service_role bypasses RLS via the bypassrls role attribute (set in
 -- local_auth_shim.sql) and is the only role permitted to act across
 -- candidates — used exclusively by trusted backend code (e.g. the signup
--- endpoint's post-provisioning step), never exposed to a client.
-grant all on public.candidate, public.personal_info, public.consent_record, public.education, public.work_authorization, public.skill, public.project, public.experience, public.achievement, public.certification, public.evidence_source, public.claim, public.opportunity, public.application, public.application_status_event, public.application_note
+-- endpoint's post-provisioning step, and the ingestion/matching scripts'
+-- writes to opportunity_source/opportunity_match), never exposed to a
+-- client.
+grant all on public.candidate, public.personal_info, public.consent_record, public.education, public.work_authorization, public.skill, public.project, public.experience, public.achievement, public.certification, public.evidence_source, public.claim, public.opportunity, public.application, public.application_status_event, public.application_note, public.opportunity_source, public.opportunity_match
   to service_role;

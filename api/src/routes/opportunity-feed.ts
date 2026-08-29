@@ -33,7 +33,7 @@ import {
 } from "../lib/opportunityFeed.js";
 
 const OPPORTUNITY_MATCH_COLUMNS =
-  "id, opportunity_source_id, match_score, eligibility_status, match_breakdown, inbox_status, is_priority";
+  "id, opportunity_source_id, match_score, eligibility_status, match_breakdown, inbox_status, is_priority, promoted_opportunity_id";
 
 const OPPORTUNITY_SOURCE_COLUMNS =
   "id, title, company, location, work_mode, employment_type, posted_date, application_url, status";
@@ -111,6 +111,33 @@ export function opportunityFeedRouter(): Router {
     const candidateId = await getOwnCandidateId(req);
     if (!candidateId) {
       return res.status(404).json({ error: "candidate_not_found" });
+    }
+
+    // promoted_opportunity_id references public.opportunity(id) — a
+    // Postgres FK constraint only checks that the row EXISTS, not that
+    // this candidate owns it (FK checks run outside RLS). Since
+    // `opportunity` is itself candidate-owned (0017_opportunity.sql), a
+    // candidate must not be able to point their own opportunity_match row
+    // at someone else's opportunity id. req.supabase is RLS-scoped, so a
+    // SELECT for an id that isn't this candidate's own opportunity simply
+    // returns no row (RLS's normal silent-filter behavior) — that's used
+    // here as the ownership check, same "confirm it's actually theirs
+    // before writing" posture used for id+candidate_id below.
+    if (parsed.data.promoted_opportunity_id) {
+      const { data: ownedOpportunity, error: opportunityError } = await supabase
+        .from("opportunity")
+        .select("id")
+        .eq("id", parsed.data.promoted_opportunity_id)
+        .maybeSingle();
+
+      if (opportunityError) {
+        return res
+          .status(400)
+          .json({ error: "promoted_opportunity_lookup_failed", message: opportunityError.message });
+      }
+      if (!ownedOpportunity) {
+        return res.status(400).json({ error: "invalid_promoted_opportunity_id" });
+      }
     }
 
     // Scoped to BOTH id and candidate_id — RLS already restricts this
