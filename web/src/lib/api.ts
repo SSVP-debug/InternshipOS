@@ -425,6 +425,17 @@ export interface TodayRecentlyApplied {
   company: string;
   applied_at: string;
 }
+export interface TodayFeedHighlight {
+  opportunity_match_id: string;
+  title: string;
+  company: string;
+  match_score: number;
+  eligibility_status: "eligible" | "ineligible" | "unknown";
+}
+export interface TodayFeedSummary {
+  new_matches_count: number;
+  top_matches: TodayFeedHighlight[];
+}
 export interface TodayView {
   generated_at: string;
   action_required: TodayActionItem[];
@@ -433,6 +444,7 @@ export interface TodayView {
   saved_opportunities: TodaySavedOpportunity[];
   recently_applied: TodayRecentlyApplied[];
   pipeline_summary: Record<string, number>;
+  feed_summary: TodayFeedSummary;
   stats: {
     total_applications: number;
     active_applications: number;

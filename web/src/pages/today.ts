@@ -62,6 +62,47 @@ export async function renderToday(root: HTMLElement) {
     ]),
   );
 
+  // feed_summary: a small, read-only pointer at the candidate's
+  // personalized opportunity feed (Phase 2B) — no save/dismiss/priority/
+  // apply actions here, only enough to say "you have new matches" and
+  // send them to /feed, which remains the one place to act on them.
+  main.append(h("h2", { class: "section-title" }, ["New matches"]));
+  if (view.feed_summary.top_matches.length === 0) {
+    main.append(
+      h("div", { class: "empty" }, [
+        view.feed_summary.new_matches_count > 0
+          ? "You have new matches waiting. "
+          : "No new matches right now. ",
+        h("a", { href: "#/feed" }, ["Open your feed"]),
+        ".",
+      ]),
+    );
+  } else {
+    const card = h("div", { class: "card" }, []);
+    card.append(
+      h("div", { class: "list-row", style: "border-top:none" }, [
+        h("div", { class: "list-row__main" }, [
+          h("div", { class: "list-row__meta" }, [
+            `${view.feed_summary.new_matches_count} new match${view.feed_summary.new_matches_count === 1 ? "" : "es"} to review`,
+          ]),
+        ]),
+        h("button", { class: "btn btn--small btn--primary", onClick: () => navigate("/feed") }, ["Open feed"]),
+      ]),
+    );
+    view.feed_summary.top_matches.forEach((m) => {
+      card.append(
+        h("div", { class: "list-row" }, [
+          h("div", { class: "list-row__main" }, [
+            h("div", { class: "list-row__title" }, [m.title]),
+            h("div", { class: "list-row__meta" }, [`${m.company} · Match ${Math.round(m.match_score)}`]),
+          ]),
+          h("button", { class: "btn btn--small", onClick: () => navigate("/feed") }, ["View"]),
+        ]),
+      );
+    });
+    main.append(card);
+  }
+
   main.append(h("h2", { class: "section-title" }, ["Needs your attention"]));
   if (view.action_required.length === 0) {
     main.append(h("div", { class: "empty" }, ["Nothing urgent today — nice work staying on top of it."]));

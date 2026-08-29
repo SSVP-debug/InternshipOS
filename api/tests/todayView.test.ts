@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { buildTodayView, type ApplicationRow, type OpportunityRow } from "../src/lib/todayView.js";
+import type { OpportunityFeedItem } from "../src/lib/opportunityFeed.js";
 
 const NOW = new Date("2026-02-10T12:00:00Z"); // fixed "today" = 2026-02-10
 
@@ -246,5 +247,88 @@ describe("buildTodayView — resilience to missing opportunity data", () => {
     expect(() => buildTodayView({ applications, opportunities: [], now: NOW })).not.toThrow();
     const view = buildTodayView({ applications, opportunities: [], now: NOW });
     expect(view.follow_ups_due[0].title).toContain("no longer available");
+  });
+});
+
+describe("buildTodayView — feed_summary", () => {
+  function feedItem(overrides: Partial<OpportunityFeedItem> & { opportunity_match_id: string }): OpportunityFeedItem {
+    return {
+      opportunity_source_id: "source-1",
+      title: "Backend Engineering Intern",
+      company: "Nimbus Labs",
+      location: "Remote",
+      work_mode: "remote",
+      employment_type: "internship",
+      posted_date: "2026-02-01",
+      application_url: "https://example.com/apply",
+      match_score: 80,
+      eligibility_status: "unknown",
+      match_reasons: [],
+      match_missing: [],
+      match_unknown: [],
+      inbox_status: "new",
+      is_priority: false,
+      promoted_opportunity_id: null,
+      ...overrides,
+    };
+  }
+
+  it("defaults to an empty feed_summary when feedItems is omitted entirely", () => {
+    const view = buildTodayView({ applications: [], opportunities: [], now: NOW });
+    expect(view.feed_summary).toEqual({ new_matches_count: 0, top_matches: [] });
+  });
+
+  it("counts only 'new' inbox_status matches toward new_matches_count", () => {
+    const feedItems = [
+      feedItem({ opportunity_match_id: "m1", inbox_status: "new" }),
+      feedItem({ opportunity_match_id: "m2", inbox_status: "saved" }),
+      feedItem({ opportunity_match_id: "m3", inbox_status: "dismissed" }),
+    ];
+    const view = buildTodayView({ applications: [], opportunities: [], feedItems, now: NOW });
+    expect(view.feed_summary.new_matches_count).toBe(1);
+  });
+
+  it("excludes ineligible matches from both new_matches_count and top_matches", () => {
+    const feedItems = [
+      feedItem({ opportunity_match_id: "m1", inbox_status: "new", eligibility_status: "ineligible" }),
+      feedItem({ opportunity_match_id: "m2", inbox_status: "new", eligibility_status: "eligible" }),
+    ];
+    const view = buildTodayView({ applications: [], opportunities: [], feedItems, now: NOW });
+    expect(view.feed_summary.new_matches_count).toBe(1);
+    expect(view.feed_summary.top_matches.map((m) => m.opportunity_match_id)).toEqual(["m2"]);
+  });
+
+  it("excludes already-promoted matches — a candidate who already applied doesn't need to be told about it again", () => {
+    const feedItems = [
+      feedItem({ opportunity_match_id: "m1", inbox_status: "new", promoted_opportunity_id: "opp-applied-1" }),
+      feedItem({ opportunity_match_id: "m2", inbox_status: "new", promoted_opportunity_id: null }),
+    ];
+    const view = buildTodayView({ applications: [], opportunities: [], feedItems, now: NOW });
+    expect(view.feed_summary.new_matches_count).toBe(1);
+    expect(view.feed_summary.top_matches.map((m) => m.opportunity_match_id)).toEqual(["m2"]);
+  });
+
+  it("caps top_matches at 3 and relies on feedItems already being sorted (does not re-sort)", () => {
+    const feedItems = [
+      feedItem({ opportunity_match_id: "m1", match_score: 90 }),
+      feedItem({ opportunity_match_id: "m2", match_score: 80 }),
+      feedItem({ opportunity_match_id: "m3", match_score: 70 }),
+      feedItem({ opportunity_match_id: "m4", match_score: 60 }),
+    ];
+    const view = buildTodayView({ applications: [], opportunities: [], feedItems, now: NOW });
+    expect(view.feed_summary.top_matches).toHaveLength(3);
+    expect(view.feed_summary.top_matches.map((m) => m.opportunity_match_id)).toEqual(["m1", "m2", "m3"]);
+  });
+
+  it("top_matches carries only the fields a dashboard highlight needs, not the full feed item shape", () => {
+    const feedItems = [feedItem({ opportunity_match_id: "m1", title: "Data Intern", company: "Zeta Labs", match_score: 55 })];
+    const view = buildTodayView({ applications: [], opportunities: [], feedItems, now: NOW });
+    expect(view.feed_summary.top_matches[0]).toEqual({
+      opportunity_match_id: "m1",
+      title: "Data Intern",
+      company: "Zeta Labs",
+      match_score: 55,
+      eligibility_status: "unknown",
+    });
   });
 });

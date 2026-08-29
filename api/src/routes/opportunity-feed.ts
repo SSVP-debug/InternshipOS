@@ -32,11 +32,15 @@ import {
   type OpportunitySourceRow,
 } from "../lib/opportunityFeed.js";
 
-const OPPORTUNITY_MATCH_COLUMNS =
+export const OPPORTUNITY_MATCH_COLUMNS =
   "id, opportunity_source_id, match_score, eligibility_status, match_breakdown, inbox_status, is_priority, promoted_opportunity_id";
 
-const OPPORTUNITY_SOURCE_COLUMNS =
+export const OPPORTUNITY_SOURCE_COLUMNS =
   "id, title, company, location, work_mode, employment_type, posted_date, application_url, status";
+// Exported (not just module-local) because today.ts also fetches these same
+// two tables — for its own feed_summary section (see todayView.ts) — and
+// reuses these exact column lists rather than risking drift from a
+// hand-copied duplicate.
 
 // MVP cap — no pagination infrastructure yet, just a fixed limit on how
 // many of the candidate's own opportunity_match rows are considered for

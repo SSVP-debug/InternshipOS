@@ -9,6 +9,19 @@
 // an application, open an opportunity link, log a follow-up) — per the
 // brief's explicit warning against "a generic SaaS dashboard filled with
 // meaningless cards."
+//
+// feed_summary (added alongside the P0/P1 automation work): a small,
+// read-only surface of the candidate's personalized opportunity feed
+// (Phase 2B, lib/opportunityFeed.ts) — new-match count plus the top few
+// highest-scoring, non-ineligible, not-yet-promoted matches. This is
+// intentionally NOT a duplicate feed UI: no save/dismiss/priority/apply
+// actions live here, only enough to prompt "you have new matches, go
+// look" and link through to the full /feed page, which remains the only
+// place a candidate actually acts on a match. Closes the gap the original
+// audit flagged: before this, Today and Feed were two disconnected
+// surfaces with no link between them.
+
+import type { OpportunityFeedItem } from "./opportunityFeed.js";
 
 export interface ApplicationRow {
   id: string;
@@ -34,6 +47,13 @@ export interface OpportunityRow {
 export interface TodayViewInput {
   applications: ApplicationRow[];
   opportunities: OpportunityRow[];
+  // Optional — a caller that hasn't fetched feed data yet (or a test that
+  // doesn't care about feed_summary) can omit this entirely; it defaults
+  // to an empty feed, which yields new_matches_count: 0, top_matches: [].
+  // Expected to already be sorted match_score descending, the same
+  // ordering buildOpportunityFeed() itself guarantees — this function does
+  // not re-sort.
+  feedItems?: OpportunityFeedItem[];
   /** Caller's current date/time. Injected (not `new Date()` internally) so tests are deterministic. */
   now: Date;
 }
@@ -95,6 +115,23 @@ export interface TodayRecentlyApplied {
   applied_at: string;
 }
 
+export interface TodayFeedHighlight {
+  opportunity_match_id: string;
+  title: string;
+  company: string;
+  match_score: number;
+  eligibility_status: "eligible" | "ineligible" | "unknown";
+}
+
+export interface TodayFeedSummary {
+  // Matches the candidate hasn't triaged yet (inbox_status === "new") and
+  // hasn't already turned into an application. Deliberately excludes
+  // ineligible matches — an "ineligible" match isn't something that needs
+  // the candidate's attention today, it's already resolved.
+  new_matches_count: number;
+  top_matches: TodayFeedHighlight[];
+}
+
 export interface TodayView {
   generated_at: string;
   action_required: TodayActionItem[];
@@ -103,6 +140,7 @@ export interface TodayView {
   saved_opportunities: TodaySavedOpportunity[];
   recently_applied: TodayRecentlyApplied[];
   pipeline_summary: Record<string, number>;
+  feed_summary: TodayFeedSummary;
   stats: {
     total_applications: number;
     active_applications: number;
@@ -112,7 +150,35 @@ export interface TodayView {
   };
 }
 
-export function buildTodayView({ applications, opportunities, now }: TodayViewInput): TodayView {
+const TOP_FEED_MATCHES_LIMIT = 3;
+
+function summarizeFeedForToday(feedItems: OpportunityFeedItem[]): TodayFeedSummary {
+  // Matches already promoted into an application, or already resolved as
+  // ineligible, don't need to surface here — this section exists to
+  // prompt "you have something new to look at," not to duplicate the
+  // full feed.
+  const actionable = feedItems.filter(
+    (item) => item.eligibility_status !== "ineligible" && item.promoted_opportunity_id === null,
+  );
+
+  const newMatchesCount = actionable.filter((item) => item.inbox_status === "new").length;
+
+  // feedItems is expected to already be sorted match_score descending (see
+  // buildOpportunityFeed) — slicing here relies on that ordering rather
+  // than re-sorting it, since this is meant to be a cheap, pure summary,
+  // not a second ranking implementation to keep in sync with the first.
+  const topMatches: TodayFeedHighlight[] = actionable.slice(0, TOP_FEED_MATCHES_LIMIT).map((item) => ({
+    opportunity_match_id: item.opportunity_match_id,
+    title: item.title,
+    company: item.company,
+    match_score: item.match_score,
+    eligibility_status: item.eligibility_status,
+  }));
+
+  return { new_matches_count: newMatchesCount, top_matches: topMatches };
+}
+
+export function buildTodayView({ applications, opportunities, feedItems = [], now }: TodayViewInput): TodayView {
   const today = toDateOnly(now);
   const opportunityById = new Map(opportunities.map((o) => [o.id, o]));
   const opportunityIdsWithApplication = new Set(applications.map((a) => a.opportunity_id));
@@ -232,6 +298,7 @@ export function buildTodayView({ applications, opportunities, now }: TodayViewIn
     saved_opportunities: savedOpportunities,
     recently_applied: recentlyApplied,
     pipeline_summary: pipelineSummary,
+    feed_summary: summarizeFeedForToday(feedItems),
     stats: {
       total_applications: applications.length,
       active_applications: activeApplications,
