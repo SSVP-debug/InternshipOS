@@ -25,7 +25,7 @@
     "helmet": "^7.1.0",
     "pino": "^9.5.0",
     "pino-http": "^10.3.0",
-    "zod": "^3.23.8"
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/cors": "^2.8.19",
