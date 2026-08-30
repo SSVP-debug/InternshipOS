@@ -38,13 +38,51 @@ name: Daily Opportunity Pipeline
 
 on:
   schedule:
-    - cron: "0 5 * * *" # daily at 05:00 UTC — before a typical India-morning check-in
+    # 00:00 UTC = 05:30 IST (UTC+5:30) — early morning, comfortably before
+    # a typical 7-9am India check-in. The original choice here (05:00 UTC)
+    # was a mistake: 05:00 UTC = 10:30 IST, which is late morning, not
+    # "before" anything — caught on a later re-review of this file, not at
+    # the time it was written. Verify this arithmetic yourself before
+    # trusting it, the same way this correction was found: IST is UTC+5:30
+    # with no daylight saving, so `cron UTC hour + 5:30 = IST time` always
+    # holds, no seasonal adjustment needed.
+    - cron: "0 0 * * *"
   workflow_dispatch: {} # allow manual trigger for testing and on-demand runs
+
+# Least-privilege: this workflow only ever reads code (checkout) and talks
+# to external APIs/Supabase — it never pushes to the repo, opens a PR, or
+# comments on anything, so it doesn't need the default read/write
+# GITHUB_TOKEN GitHub Actions would otherwise grant. Minimizes blast radius
+# if a compromised dependency in the install step ever tried to abuse the
+# token for something this job was never meant to do.
+permissions:
+  contents: read
+
+# Prevents a manual workflow_dispatch run from overlapping with a
+# still-running scheduled run (or two manual triggers back to back) —
+# both would otherwise hit Adzuna/RemoteOK and write to the same
+# candidates' opportunity_match rows simultaneously. Both stages are
+# idempotent (see writeOpportunitySource.ts / runMatchingForCandidate.ts's
+# own upsert behavior), so an overlap wouldn't corrupt anything, but it's
+# wasteful — double API calls against Adzuna's rate-limited quota, double
+# Supabase writes for no benefit. cancel-in-progress: false means a new
+# run queues behind an in-progress one rather than being cancelled or
+# running concurrently — nothing already fetched/matched gets thrown away.
+concurrency:
+  group: daily-pipeline
+  cancel-in-progress: false
 
 jobs:
   daily-pipeline:
     name: Ingest opportunities, then match every candidate
     runs-on: ubuntu-latest
+    # Safety net, not an expected outcome — every step here should finish
+    # in well under a minute against real data volumes (see the audit's
+    # own manual-run numbers: ~100-200 opportunities, one candidate batch).
+    # Exists so a genuine hang (e.g. a network call that never times out
+    # internally) fails loudly instead of silently consuming Action
+    # minutes for hours.
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: api

@@ -20,6 +20,11 @@ on:
     - cron: "0 6 */3 * *" # every 3 days at 06:00 UTC
   workflow_dispatch: {} # allow manual trigger for testing
 
+# Least-privilege: this job only ever makes an outbound curl call — it
+# never touches the repo itself, so it doesn't need repo write access.
+permissions:
+  contents: read
+
 jobs:
   ping-supabase:
     name: Ping production Supabase project

@@ -1,0 +1,17 @@
+{
+  // Same gap, same fix, as api/tsconfig.tests.json — see that file's own
+  // comment for the full story (found during the P0/P1 automation work,
+  // PROGRESS_SESSION.md section 1f/1g). tsconfig.json's own "include" is
+  // ["src"] only (deliberately — it's what `tsc && vite build` uses, and
+  // test files have no business being part of the production build), so
+  // `npx tsc --noEmit` here has never actually type-checked web/tests/ —
+  // vitest transpiles test files with esbuild, which strips types without
+  // checking them.
+  //
+  // Unlike the api-side version of this fix, no latent errors were found
+  // when this was first probed (web/tests/ was already clean) — this file
+  // exists purely so that stays true going forward, rather than silently
+  // regressing the same way api/tests/ had.
+  "extends": "./tsconfig.json",
+  "include": ["src", "tests"]
+}
