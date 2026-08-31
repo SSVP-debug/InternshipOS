@@ -99,12 +99,29 @@ jobs:
         run: npm ci
 
       - name: Verify required secrets are set
+        # Secrets passed via `env:`, referenced as $SHELL_VARS below —
+        # not interpolated directly as ${{ secrets.X }} inside the run:
+        # string. secrets.* isn't attacker-controlled the way, say,
+        # github.event.pull_request.title would be, so this isn't the
+        # classic GitHub Actions script-injection vector — but the env:
+        # pattern is still the recommended hardening for ANY ${{ }}
+        # expression inside a run: block, secrets included: defense in
+        # depth against a secret value that happens to contain a shell
+        # metacharacter (backtick, $(...), quote) breaking the intended
+        # `if` logic. The two steps below (Ingest/Match) already do this
+        # correctly for the same secrets — this step is the one that
+        # didn't, until now.
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          ADZUNA_APP_ID: ${{ secrets.ADZUNA_APP_ID }}
+          ADZUNA_APP_KEY: ${{ secrets.ADZUNA_APP_KEY }}
         run: |
-          if [ -z "${{ secrets.SUPABASE_URL }}" ] || [ -z "${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" ]; then
+          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_SERVICE_ROLE_KEY" ]; then
             echo "::error::SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY repo secret is not set. See this workflow's header comment for setup steps."
             exit 1
           fi
-          if [ -z "${{ secrets.ADZUNA_APP_ID }}" ] || [ -z "${{ secrets.ADZUNA_APP_KEY }}" ]; then
+          if [ -z "$ADZUNA_APP_ID" ] || [ -z "$ADZUNA_APP_KEY" ]; then
             echo "::warning::ADZUNA_APP_ID / ADZUNA_APP_KEY not set — the Adzuna source will be skipped for this run (RemoteOK still runs). This is not fatal."
           fi
 
