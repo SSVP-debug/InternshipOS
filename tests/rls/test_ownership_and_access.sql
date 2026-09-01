@@ -312,7 +312,78 @@ begin
   raise notice 'PASS: service_role (trusted backend only) can update profile_status across candidates';
 end $$;
 
-\echo '--- Test 13: service_role can read across candidates (trusted backend path) ---'
+\echo '--- Test 13: candidate CANNOT change auth_user_id or created_at via UPDATE — write guard (0024) blocks it ---'
+-- Regression test for the gap flagged in the Round 23 audit: before 0024,
+-- candidate_update_own had no column-level restriction at all, so this
+-- would have silently succeeded.
+do $$
+declare v_uid uuid; v_cand uuid; v_other_uid uuid; failed boolean := false;
+begin
+  select val into v_uid from test_ids where key = 'user_a';
+  select val into v_cand from test_ids where key = 'cand_a';
+  v_other_uid := gen_random_uuid();
+
+  perform set_config('request.jwt.claims', json_build_object('sub', v_uid)::text, true);
+  set local role authenticated;
+  begin
+    update public.candidate set created_at = now() - interval '10 years' where id = v_cand;
+  exception when others then
+    failed := true;
+  end;
+  reset role;
+  if not failed then
+    raise exception 'FAIL: candidate was able to rewrite their own created_at';
+  end if;
+  raise notice 'PASS: candidate cannot change created_at via UPDATE';
+
+  perform set_config('request.jwt.claims', json_build_object('sub', v_uid)::text, true);
+  set local role authenticated;
+  failed := false;
+  begin
+    update public.candidate set auth_user_id = v_other_uid where id = v_cand;
+  exception when others then
+    failed := true;
+  end;
+  reset role;
+  if not failed then
+    raise exception 'FAIL: candidate was able to rewrite their own auth_user_id';
+  end if;
+  raise notice 'PASS: candidate cannot change auth_user_id via UPDATE';
+end $$;
+
+\echo '--- Test 14: candidate CAN still update data_retention_ack_at — the write guard (0024) is a narrow allowlist, not a full lockdown ---'
+do $$
+declare v_uid uuid; v_cand uuid; v_ack timestamptz;
+begin
+  select val into v_uid from test_ids where key = 'user_a';
+  select val into v_cand from test_ids where key = 'cand_a';
+  perform set_config('request.jwt.claims', json_build_object('sub', v_uid)::text, true);
+  set local role authenticated;
+  update public.candidate set data_retention_ack_at = now() where id = v_cand;
+  select data_retention_ack_at into v_ack from public.candidate where id = v_cand;
+  reset role;
+  if v_ack is null then
+    raise exception 'FAIL: candidate could not set their own data_retention_ack_at';
+  end if;
+  raise notice 'PASS: candidate can update their own data_retention_ack_at';
+end $$;
+
+\echo '--- Test 15: service_role bypasses the write guard (0024) — trusted backend path is unrestricted, per the migration''s own documented exemption ---'
+do $$
+declare v_cand_b uuid; v_new_created timestamptz := now() - interval '5 years'; v_result timestamptz;
+begin
+  select val into v_cand_b from test_ids where key = 'cand_b';
+  set local role service_role;
+  update public.candidate set created_at = v_new_created where id = v_cand_b;
+  select created_at into v_result from public.candidate where id = v_cand_b;
+  reset role;
+  if v_result is distinct from v_new_created then
+    raise exception 'FAIL: service_role was blocked by the candidate column write guard';
+  end if;
+  raise notice 'PASS: service_role bypasses the candidate column write guard';
+end $$;
+
+\echo '--- Test 16: service_role can read across candidates (trusted backend path) ---'
 do $$
 declare v_count int;
 begin
