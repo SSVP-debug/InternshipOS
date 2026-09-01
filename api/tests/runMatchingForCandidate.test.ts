@@ -5,6 +5,7 @@ import { buildOpportunityMatchInput } from "../src/lib/matching/buildOpportunity
 import { matchCandidate } from "../src/lib/matchEngine.js";
 
 const CANDIDATE_ID = "11111111-1111-1111-1111-111111111111";
+const RESUME_ID = "55555555-5555-5555-5555-555555555555";
 
 /** The exact shape returned by a real ingested-but-unenriched opportunity_source row (see Phase 2 inspection, finding G). */
 const UNENRICHED_OPPORTUNITY_ROW = {
@@ -28,23 +29,42 @@ const UNENRICHED_OPPORTUNITY_ROW = {
 
 /**
  * Minimal mock of the subset of the Supabase query builder this
- * orchestrator uses. Configurable per table via `tableResults`, and for
- * opportunity_match's upsert via `upsertError`. No live network or
- * Supabase calls — same style as writeOpportunitySource.test.ts.
+ * orchestrator uses. Configurable per table via `tableResults`, for the
+ * Gate R2 batch-upsert RPC via `rpcError`, and for resume-scoped skill
+ * loading via `resumeSkillNames` (the resume_skill -> skill embed).
+ *
+ * Gate R2 changed the write path from `.from("opportunity_match")
+ * .upsert(...)` to `.rpc("upsert_opportunity_match_batch", ...)` — see
+ * runMatchingForCandidate.ts's own comments for why a plain client-side
+ * upsert can no longer target opportunity_match's two partial unique
+ * indexes. This mock reflects that: opportunity_match no longer needs
+ * its own `from()` branch at all, and `rpcMock` replaces `upsertMock`.
  */
 function mockSupabase(options: {
   tableResults?: Record<string, { data: unknown; error: { message: string } | null }>;
-  upsertError?: { message: string } | null;
+  rpcError?: { message: string } | null;
+  resumeSkillNames?: string[];
 } = {}) {
   const eqSpy = vi.fn();
-  const upsertMock = vi.fn(async (_rows: unknown[], _opts: unknown) => ({
+  const rpcMock = vi.fn(async (_fn: string, _args: unknown) => ({
     data: null,
-    error: options.upsertError ?? null,
+    error: options.rpcError ?? null,
   }));
 
   const from = vi.fn((table: string) => {
-    if (table === "opportunity_match") {
-      return { upsert: upsertMock };
+    if (table === "resume_skill") {
+      return {
+        select: vi.fn((_cols: string) => ({
+          eq: vi.fn((col: string, val: string) => {
+            eqSpy(table, col, val);
+            if (options.tableResults?.[table]) {
+              return Promise.resolve(options.tableResults[table]);
+            }
+            const names = options.resumeSkillNames ?? [];
+            return Promise.resolve({ data: names.map((name) => ({ skill: { name } })), error: null });
+          }),
+        })),
+      };
     }
 
     // Real Supabase .maybeSingle() returns { data: null, error: null }
@@ -70,7 +90,7 @@ function mockSupabase(options: {
     };
   });
 
-  return { from, upsertMock, eqSpy } as any;
+  return { from, rpc: rpcMock, rpcMock, eqSpy } as any;
 }
 
 describe("runMatchingForCandidate", () => {
@@ -91,7 +111,7 @@ describe("runMatchingForCandidate", () => {
     expect(supabase.eqSpy).toHaveBeenCalledWith("opportunity_source", "status", "active");
   });
 
-  it("calls matchCandidate and writes score/eligibility/breakdown into opportunity_match", async () => {
+  it("calls matchCandidate and writes score/eligibility/breakdown via the batch-upsert RPC", async () => {
     const supabase = mockSupabase({
       tableResults: {
         skill: { data: [{ name: "python" }], error: null },
@@ -103,14 +123,18 @@ describe("runMatchingForCandidate", () => {
 
     expect(summary.opportunitiesEvaluated).toBe(1);
     expect(summary.insertedOrUpdated).toBe(1);
-    expect(supabase.upsertMock).toHaveBeenCalledTimes(1);
+    expect(summary.resumeId).toBeNull();
+    expect(supabase.rpcMock).toHaveBeenCalledTimes(1);
 
-    const [rows, opts] = supabase.upsertMock.mock.calls[0];
+    const [fnName, args] = supabase.rpcMock.mock.calls[0];
+    expect(fnName).toBe("upsert_opportunity_match_batch");
+    const rows = args.p_rows;
     expect(rows).toHaveLength(1);
 
     const row = rows[0];
     expect(row.candidate_id).toBe(CANDIDATE_ID);
     expect(row.opportunity_source_id).toBe(UNENRICHED_OPPORTUNITY_ROW.id);
+    expect(row.resume_id).toBeNull();
 
     // Cross-check against a direct call to the real, unmodified matchCandidate.
     const expected = matchCandidate(
@@ -132,10 +156,40 @@ describe("runMatchingForCandidate", () => {
       missing: expected.missing,
       unknown: expected.unknown,
     });
+  });
 
-    // Upsert is scoped to the existing unique constraint, so a re-run
-    // updates rather than duplicates.
-    expect(opts).toEqual({ onConflict: "candidate_id,opportunity_source_id" });
+  it("Gate R2: with a resumeId, loads skills via resume_skill instead of the candidate's full skill table", async () => {
+    const supabase = mockSupabase({
+      tableResults: { opportunity_source: { data: [UNENRICHED_OPPORTUNITY_ROW], error: null } },
+      resumeSkillNames: ["python"],
+    });
+
+    const summary = await runMatchingForCandidate(supabase, CANDIDATE_ID, RESUME_ID);
+
+    expect(summary.resumeId).toBe(RESUME_ID);
+
+    const tablesQueried = supabase.from.mock.calls.map((call: unknown[]) => call[0]);
+    expect(tablesQueried).not.toContain("skill");
+    expect(tablesQueried).toContain("resume_skill");
+    expect(supabase.eqSpy).toHaveBeenCalledWith("resume_skill", "resume_id", RESUME_ID);
+
+    const [, args] = supabase.rpcMock.mock.calls[0];
+    const row = args.p_rows[0];
+    expect(row.resume_id).toBe(RESUME_ID);
+    // Same skill ("python") as the candidate-level test above, loaded
+    // through resume_skill this time — score/eligibility should match.
+    expect(row.eligibility_status).toBeDefined();
+  });
+
+  it("Gate R2: a resume with no linked skills produces an empty skill list, not an error", async () => {
+    const supabase = mockSupabase({
+      tableResults: { opportunity_source: { data: [UNENRICHED_OPPORTUNITY_ROW], error: null } },
+      resumeSkillNames: [],
+    });
+
+    const summary = await runMatchingForCandidate(supabase, CANDIDATE_ID, RESUME_ID);
+    expect(summary.errors).toHaveLength(0);
+    expect(summary.eligibilityCounts.unknown).toBe(1); // no skills stated -> unknown, never guessed
   });
 
   it("an opportunity with every 0023 eligibility column NULL results in eligibility_status = 'unknown' — never guessed", async () => {
@@ -146,13 +200,13 @@ describe("runMatchingForCandidate", () => {
     });
 
     const summary = await runMatchingForCandidate(supabase, CANDIDATE_ID);
-    const [rows] = supabase.upsertMock.mock.calls[0];
+    const [, args] = supabase.rpcMock.mock.calls[0];
 
-    expect(rows[0].eligibility_status).toBe("unknown");
+    expect(args.p_rows[0].eligibility_status).toBe("unknown");
     expect(summary.eligibilityCounts).toEqual({ eligible: 0, ineligible: 0, unknown: 1 });
   });
 
-  it("rerunning is an upsert (onConflict on the existing unique constraint), not an insert-only call", async () => {
+  it("rerunning calls the batch-upsert RPC again — idempotent by design (see the SQL function's ON CONFLICT branches)", async () => {
     const supabase = mockSupabase({
       tableResults: { opportunity_source: { data: [UNENRICHED_OPPORTUNITY_ROW], error: null } },
     });
@@ -160,9 +214,9 @@ describe("runMatchingForCandidate", () => {
     await runMatchingForCandidate(supabase, CANDIDATE_ID);
     await runMatchingForCandidate(supabase, CANDIDATE_ID);
 
-    expect(supabase.upsertMock).toHaveBeenCalledTimes(2);
-    for (const call of supabase.upsertMock.mock.calls) {
-      expect(call[1]).toEqual({ onConflict: "candidate_id,opportunity_source_id" });
+    expect(supabase.rpcMock).toHaveBeenCalledTimes(2);
+    for (const call of supabase.rpcMock.mock.calls) {
+      expect(call[0]).toBe("upsert_opportunity_match_batch");
     }
   });
 
@@ -175,6 +229,14 @@ describe("runMatchingForCandidate", () => {
     await expect(runMatchingForCandidate(supabase, CANDIDATE_ID)).rejects.toThrow(/connection reset/);
   });
 
+  it("Gate R2: surfaces a resume_skill read failure by throwing, same as any other prerequisite read", async () => {
+    const supabase = mockSupabase({
+      tableResults: { resume_skill: { data: null, error: { message: "connection reset" } } },
+    });
+
+    await expect(runMatchingForCandidate(supabase, CANDIDATE_ID, RESUME_ID)).rejects.toThrow(RunMatchingReadError);
+  });
+
   it("surfaces an opportunity_source read failure by throwing", async () => {
     const supabase = mockSupabase({
       tableResults: { opportunity_source: { data: null, error: { message: "timeout" } } },
@@ -183,10 +245,10 @@ describe("runMatchingForCandidate", () => {
     await expect(runMatchingForCandidate(supabase, CANDIDATE_ID)).rejects.toThrow(RunMatchingReadError);
   });
 
-  it("surfaces an opportunity_match write failure in the summary's errors, not silently", async () => {
+  it("surfaces a batch-upsert RPC failure in the summary's errors, not silently", async () => {
     const supabase = mockSupabase({
       tableResults: { opportunity_source: { data: [UNENRICHED_OPPORTUNITY_ROW], error: null } },
-      upsertError: { message: "unique constraint violation" },
+      rpcError: { message: "unique constraint violation" },
     });
 
     const summary = await runMatchingForCandidate(supabase, CANDIDATE_ID);
@@ -196,12 +258,12 @@ describe("runMatchingForCandidate", () => {
     expect(summary.errors[0]).toMatch(/unique constraint violation/);
   });
 
-  it("returns a zeroed summary and performs no upsert when there are no active opportunities", async () => {
+  it("returns a zeroed summary and makes no RPC call when there are no active opportunities", async () => {
     const supabase = mockSupabase({ tableResults: { opportunity_source: { data: [], error: null } } });
     const summary = await runMatchingForCandidate(supabase, CANDIDATE_ID);
 
     expect(summary.opportunitiesEvaluated).toBe(0);
     expect(summary.insertedOrUpdated).toBe(0);
-    expect(supabase.upsertMock).not.toHaveBeenCalled();
+    expect(supabase.rpcMock).not.toHaveBeenCalled();
   });
 });

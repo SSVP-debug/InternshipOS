@@ -217,6 +217,19 @@ judged against where it leads.
 
 ## 5. How this integrates with `opportunity_match` (Gate R2 preview — flagged tension)
 
+**RESOLVED at Gate R2 (0026_opportunity_match_resume.sql): Option 1 below
+was chosen** — `opportunity_match` was extended with a nullable
+`resume_id`, using two partial unique indexes rather than a separate
+table. This section is kept as originally written (the tension it
+identifies is real and is exactly what Gate R2 had to solve) — see
+`0026_opportunity_match_resume.sql`'s own comments for the resolved
+schema and `runMatchingForCandidate.ts`'s comments for the upsert-
+mechanics consequence that decision turned out to have (a plain
+client-side `.upsert({ onConflict })` cannot target a partial index,
+which is why a SQL-side batch-upsert function was needed on top of the
+schema change itself — not something this section anticipated, and
+worth knowing if this pattern comes up again elsewhere).
+
 This is the one place where the R0 design surfaces a real conflict that
 Gate R2 will need to resolve, not paper over:
 

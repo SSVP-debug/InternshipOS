@@ -106,7 +106,7 @@ begin
   raise notice 'PASS: match_score outside 0-100 is rejected';
 end $$;
 
-\echo '--- Test 3: a second match for the SAME (candidate, opportunity_source) pair is rejected — uq_opportunity_match_candidate_source ---'
+\echo '--- Test 3: a second match for the SAME (candidate, opportunity_source) pair is rejected (uq_opportunity_match_candidate_source_no_resume, the resume_id IS NULL partial index as of Gate R2) ---'
 do $$
 declare v_uid uuid; v_cand uuid; v_source uuid; failed boolean := false;
 begin
@@ -294,6 +294,108 @@ begin
     raise exception 'FAIL: anon role could read opportunity_match rows (count=%)', v_count;
   end if;
   raise notice 'PASS: anon role reads zero opportunity_match rows (denied at grant or RLS layer)';
+end $$;
+
+\echo '--- Gate R2 setup: one resume each for cand_a and cand_b, and a fresh source row (Test 3''s source_1 pair is already occupied by resume_id IS NULL) ---'
+do $$
+declare
+  v_cand_a uuid; v_cand_b uuid; v_resume_a_id uuid; v_resume_b_id uuid; v_source_3 uuid;
+begin
+  select val into v_cand_a from match_test_ids where key = 'cand_a';
+  select val into v_cand_b from match_test_ids where key = 'cand_b';
+
+  insert into public.resume (candidate_id, label) values (v_cand_a, 'Software Development')
+    returning id into v_resume_a_id;
+  insert into public.resume (candidate_id, label) values (v_cand_b, 'Data Science')
+    returning id into v_resume_b_id;
+
+  insert into public.opportunity_source (source_type, title, company, dedup_fingerprint, status)
+  values ('job_board', 'Platform Engineering Intern', 'Acme Corp', 'match-test-source-3', 'active')
+  returning id into v_source_3;
+
+  insert into match_test_ids values
+    ('resume_a', v_resume_a_id), ('resume_b', v_resume_b_id), ('source_3', v_source_3);
+end $$;
+
+\echo '--- Test 10: opportunity_match.resume_id must belong to the SAME candidate as the match row (trigger, not RLS — RLS is bypassed by service-role writers) ---'
+do $$
+declare v_uid_a uuid; v_cand_a uuid; v_resume_b uuid; v_source_3 uuid; failed boolean := false;
+begin
+  select val into v_uid_a from match_test_ids where key = 'user_a';
+  select val into v_cand_a from match_test_ids where key = 'cand_a';
+  select val into v_resume_b from match_test_ids where key = 'resume_b'; -- belongs to cand_b, not cand_a
+  select val into v_source_3 from match_test_ids where key = 'source_3';
+
+  perform set_config('request.jwt.claims', json_build_object('sub', v_uid_a)::text, true);
+  set local role authenticated;
+  begin
+    insert into public.opportunity_match (candidate_id, opportunity_source_id, resume_id, match_score)
+    values (v_cand_a, v_source_3, v_resume_b, 50);
+  exception when check_violation then
+    failed := true;
+  end;
+  reset role;
+
+  if not failed then
+    raise exception 'FAIL: a match row was accepted with resume_id belonging to a DIFFERENT candidate';
+  end if;
+  raise notice 'PASS: resume_id must belong to the same candidate_id as the match row (trg_opportunity_match_resume_candidate)';
+end $$;
+
+\echo '--- Test 11: a candidate-level match (resume_id NULL) and a resume-scoped match for the SAME opportunity coexist (the entire point of Gate R2) ---'
+do $$
+declare v_uid_a uuid; v_cand_a uuid; v_resume_a uuid; v_source_3 uuid; v_count int;
+begin
+  select val into v_uid_a from match_test_ids where key = 'user_a';
+  select val into v_cand_a from match_test_ids where key = 'cand_a';
+  select val into v_resume_a from match_test_ids where key = 'resume_a';
+  select val into v_source_3 from match_test_ids where key = 'source_3';
+
+  perform set_config('request.jwt.claims', json_build_object('sub', v_uid_a)::text, true);
+  set local role authenticated;
+  -- Candidate-level row (resume_id NULL) for source_3.
+  insert into public.opportunity_match (candidate_id, opportunity_source_id, resume_id, match_score)
+  values (v_cand_a, v_source_3, null, 40);
+  -- Resume-scoped row for the SAME candidate + SAME opportunity — must
+  -- NOT collide with the row above; that is the whole reason Gate R2
+  -- replaced the single unique constraint with two partial indexes.
+  insert into public.opportunity_match (candidate_id, opportunity_source_id, resume_id, match_score)
+  values (v_cand_a, v_source_3, v_resume_a, 90);
+
+  select count(*) into v_count from public.opportunity_match
+    where candidate_id = v_cand_a and opportunity_source_id = v_source_3;
+  reset role;
+
+  if v_count != 2 then
+    raise exception 'FAIL: expected 2 coexisting rows (resume_id NULL + resume_id set) for the same (candidate, opportunity), got %', v_count;
+  end if;
+  raise notice 'PASS: a candidate-level match and a resume-scoped match for the same opportunity coexist without colliding';
+end $$;
+
+\echo '--- Test 12: a SECOND resume-scoped match for the SAME (candidate, opportunity_source, resume_id) is still rejected — uq_opportunity_match_candidate_source_resume ---'
+do $$
+declare v_uid_a uuid; v_cand_a uuid; v_resume_a uuid; v_source_3 uuid; failed boolean := false;
+begin
+  select val into v_uid_a from match_test_ids where key = 'user_a';
+  select val into v_cand_a from match_test_ids where key = 'cand_a';
+  select val into v_resume_a from match_test_ids where key = 'resume_a';
+  select val into v_source_3 from match_test_ids where key = 'source_3';
+
+  perform set_config('request.jwt.claims', json_build_object('sub', v_uid_a)::text, true);
+  set local role authenticated;
+  begin
+    -- Duplicate of Test 11's second insert: same (candidate, source, resume).
+    insert into public.opportunity_match (candidate_id, opportunity_source_id, resume_id, match_score)
+    values (v_cand_a, v_source_3, v_resume_a, 10);
+  exception when unique_violation then
+    failed := true;
+  end;
+  reset role;
+
+  if not failed then
+    raise exception 'FAIL: a duplicate (candidate, opportunity_source, resume_id) match was accepted';
+  end if;
+  raise notice 'PASS: a duplicate resume-scoped match is rejected by uq_opportunity_match_candidate_source_resume';
 end $$;
 
 \echo '--- ALL OPPORTUNITY_MATCH TESTS PASSED ---'

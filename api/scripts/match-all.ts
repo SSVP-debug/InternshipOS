@@ -84,7 +84,10 @@ async function main() {
   console.log(`\nCandidates considered: ${summary.candidatesConsidered}`);
   console.log(`Candidates succeeded:  ${summary.candidatesSucceeded}`);
   console.log(`Candidates failed:     ${summary.candidatesFailed}`);
-  console.log(`\nOpportunities evaluated (total): ${summary.totalOpportunitiesEvaluated}`);
+  console.log(`\nResume-scoped passes considered: ${summary.resumePassesConsidered}`);
+  console.log(`Resume-scoped passes succeeded:  ${summary.resumePassesSucceeded}`);
+  console.log(`Resume-scoped passes failed:     ${summary.resumePassesFailed}`);
+  console.log(`\nOpportunities evaluated (total, all passes): ${summary.totalOpportunitiesEvaluated}`);
   console.log(`Inserted/updated (total):        ${summary.totalInsertedOrUpdated}`);
   console.log(`Eligibility counts (total):`);
   console.log(`  eligible:   ${summary.eligibilityCounts.eligible}`);
@@ -96,7 +99,8 @@ async function main() {
     // candidate field is logged here.
     console.log(`\nFailures (${summary.failures.length}):`);
     for (const failure of summary.failures) {
-      console.log(`  - candidate ${failure.candidateId}: ${failure.message}`);
+      const passLabel = failure.resumeId ? `resume ${failure.resumeId}` : "candidate-level pass";
+      console.log(`  - candidate ${failure.candidateId} (${passLabel}): ${failure.message}`);
     }
   }
 

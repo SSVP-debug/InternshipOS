@@ -7,6 +7,8 @@ import {
 const CANDIDATE_A = "11111111-1111-1111-1111-111111111111";
 const CANDIDATE_B = "22222222-2222-2222-2222-222222222222";
 const CANDIDATE_C = "33333333-3333-3333-3333-333333333333";
+const RESUME_A1 = "66666666-6666-6666-6666-666666666666";
+const RESUME_A2 = "77777777-7777-7777-7777-777777777777";
 
 const UNENRICHED_OPPORTUNITY_ROW = {
   id: "44444444-4444-4444-4444-444444444444",
@@ -29,28 +31,43 @@ const UNENRICHED_OPPORTUNITY_ROW = {
 
 /**
  * Mocks the subset of the Supabase query builder used by both
- * loadAllCandidateIds (this module) and runMatchingForCandidate.ts
- * (skill/education/experience/project/work_authorization/
- * opportunity_source/opportunity_match). `candidateBehavior` lets a test
- * make matching fail for one specific candidate id, either by throwing
- * (simulating a read error) or by making the opportunity_match upsert
- * fail for that candidate only.
+ * loadAllCandidateIds/loadActiveResumeIdsForCandidate (this module) and
+ * runMatchingForCandidate.ts (skill/resume_skill/education/experience/
+ * project/work_authorization/opportunity_source, plus the Gate R2
+ * batch-upsert RPC). `candidateBehavior` lets a test make matching fail
+ * for one specific candidate id, either by throwing (simulating a read
+ * error) or by making the batch-upsert RPC fail for that candidate only.
+ *
+ * Gate R2 changed the write path from `.from("opportunity_match")
+ * .upsert(...)` to `.rpc("upsert_opportunity_match_batch", ...)` — this
+ * mock's `rpc` replaces the old `opportunity_match` branch entirely.
+ * `resumeIdsByCandidate` (default: no candidate has any resumes) drives
+ * how many resume-scoped passes each candidate gets.
  */
 function mockSupabase(options: {
   candidateIds?: string[];
   candidateListError?: { message: string } | null;
   failReadForCandidate?: string;
   failUpsertForCandidate?: string;
+  resumeIdsByCandidate?: Record<string, string[]>;
 } = {}) {
   const candidateIds = options.candidateIds ?? [CANDIDATE_A, CANDIDATE_B, CANDIDATE_C];
 
   // runMatchingForCandidate.ts's internal queries are all scoped with
   // .eq("candidate_id", <id>) except opportunity_source's
-  // .eq("status","active") — track the "current" candidate_id being
-  // queried per call chain so failReadForCandidate/failUpsertForCandidate
-  // can target one candidate without affecting the others.
+  // .eq("status","active") and resume_skill's .eq("resume_id", <id>) —
+  // track the "current" candidate_id being queried per call chain so
+  // failReadForCandidate/failUpsertForCandidate can target one candidate
+  // without affecting the others.
   let currentCandidateId: string | null = null;
   const inCalls: { column: string; values: readonly string[] }[] = [];
+
+  const rpc = vi.fn(async (_fn: string, _args: unknown) => {
+    if (currentCandidateId === options.failUpsertForCandidate) {
+      return { data: null, error: { message: `upsert failed for ${currentCandidateId}` } };
+    }
+    return { data: null, error: null };
+  });
 
   const from = vi.fn((table: string) => {
     if (table === "candidate") {
@@ -67,25 +84,21 @@ function mockSupabase(options: {
       };
     }
 
-    if (table === "opportunity_match") {
+    if (table === "resume") {
       return {
-        upsert: vi.fn(async () => {
-          if (currentCandidateId === options.failUpsertForCandidate) {
-            return { data: null, error: { message: `upsert failed for ${currentCandidateId}` } };
-          }
-          return { data: null, error: null };
-        }),
+        select: vi.fn(() => ({
+          eq: vi.fn(async (col: string, val: string) => {
+            if (col === "candidate_id") currentCandidateId = val;
+            const ids = options.resumeIdsByCandidate?.[val] ?? [];
+            return { data: ids.map((id) => ({ id, is_active: true })), error: null };
+          }),
+        })),
       };
     }
 
     // opportunity_source is queried with .eq("status","active") once per
-    // candidate, independent of candidate_id — give it one active
-    // opportunity so every candidate actually evaluates something.
-    // Inlined directly here (not a separate .mockImplementation()
-    // override) — a second vi.fn() implementation with a differently-
-    // shaped return value gets type-checked against the first
-    // implementation's inferred return type, which doesn't unify cleanly;
-    // one function with every branch avoids that entirely.
+    // pass, independent of candidate_id — give it one active opportunity
+    // so every pass actually evaluates something.
     if (table === "opportunity_source") {
       return {
         select: vi.fn(() => ({
@@ -97,7 +110,7 @@ function mockSupabase(options: {
       };
     }
 
-    // skill / education / experience / project / work_authorization
+    // skill / resume_skill / education / experience / project / work_authorization
     return {
       select: vi.fn(() => ({
         eq: vi.fn((col: string, val: string) => {
@@ -119,20 +132,23 @@ function mockSupabase(options: {
     };
   });
 
-  return { from, __inCalls: inCalls } as any;
+  return { from, rpc, __inCalls: inCalls } as any;
 }
 
 describe("runMatchingForActiveCandidates", () => {
-  it("loads every candidate id from public.candidate and matches each one", async () => {
+  it("loads every candidate id from public.candidate and matches each one (candidate-level pass)", async () => {
     const supabase = mockSupabase();
     const summary = await runMatchingForActiveCandidates(supabase);
 
     expect(summary.candidatesConsidered).toBe(3);
     expect(summary.candidatesSucceeded).toBe(3);
     expect(summary.candidatesFailed).toBe(0);
+    expect(summary.resumePassesConsidered).toBe(0);
     expect(summary.perCandidate.map((c) => c.candidateId).sort()).toEqual(
       [CANDIDATE_A, CANDIDATE_B, CANDIDATE_C].sort()
     );
+    // No resumes configured for anyone in this test -> every entry is the candidate-level pass.
+    expect(summary.perCandidate.every((c) => c.resumeId === null)).toBe(true);
   });
 
   it("filters the candidate query to profile_status in ('incomplete','active') — pausing/archiving opts a candidate out of the daily batch", async () => {
@@ -146,12 +162,43 @@ describe("runMatchingForActiveCandidates", () => {
     const supabase = mockSupabase();
     const summary = await runMatchingForActiveCandidates(supabase);
 
-    // One active opportunity per candidate, no eligibility signals stated
-    // anywhere -> each resolves to "unknown", matching matchEngine.ts's
-    // documented "never guess" rule.
+    // One active opportunity per candidate-level pass, no eligibility
+    // signals stated anywhere -> each resolves to "unknown", matching
+    // matchEngine.ts's documented "never guess" rule.
     expect(summary.totalOpportunitiesEvaluated).toBe(3);
     expect(summary.totalInsertedOrUpdated).toBe(3);
     expect(summary.eligibilityCounts).toEqual({ eligible: 0, ineligible: 0, unknown: 3 });
+  });
+
+  it("Gate R2: a candidate with two active resumes gets one candidate-level pass plus two resume-scoped passes", async () => {
+    const supabase = mockSupabase({
+      candidateIds: [CANDIDATE_A],
+      resumeIdsByCandidate: { [CANDIDATE_A]: [RESUME_A1, RESUME_A2] },
+    });
+
+    const summary = await runMatchingForActiveCandidates(supabase);
+
+    expect(summary.candidatesConsidered).toBe(1);
+    expect(summary.candidatesSucceeded).toBe(1); // candidate-level pass only
+    expect(summary.resumePassesConsidered).toBe(2);
+    expect(summary.resumePassesSucceeded).toBe(2);
+    expect(summary.resumePassesFailed).toBe(0);
+
+    const resumeIdsSeen = summary.perCandidate.map((c) => c.resumeId).sort();
+    expect(resumeIdsSeen).toEqual([RESUME_A1, RESUME_A2, null].sort());
+
+    // 3 passes total (1 candidate-level + 2 resume) x 1 opportunity each.
+    expect(summary.totalOpportunitiesEvaluated).toBe(3);
+    expect(summary.totalInsertedOrUpdated).toBe(3);
+  });
+
+  it("Gate R2: candidates with no resumes get zero resume passes — purely additive, not required", async () => {
+    const supabase = mockSupabase({ resumeIdsByCandidate: {} });
+    const summary = await runMatchingForActiveCandidates(supabase);
+
+    expect(summary.resumePassesConsidered).toBe(0);
+    expect(summary.resumePassesSucceeded).toBe(0);
+    expect(summary.resumePassesFailed).toBe(0);
   });
 
   it("one candidate's read failure is recorded as a failure and does not stop the others", async () => {
@@ -162,13 +209,13 @@ describe("runMatchingForActiveCandidates", () => {
     expect(summary.candidatesSucceeded).toBe(2);
     expect(summary.candidatesFailed).toBe(1);
     expect(summary.failures).toEqual([
-      { candidateId: CANDIDATE_B, message: expect.stringContaining("read failed") },
+      { candidateId: CANDIDATE_B, resumeId: null, message: expect.stringContaining("read failed") },
     ]);
     // the other two candidates still succeeded
     expect(summary.perCandidate.map((c) => c.candidateId).sort()).toEqual([CANDIDATE_A, CANDIDATE_C].sort());
   });
 
-  it("a candidate whose opportunity_match upsert fails is reported as a failure, not counted as succeeded", async () => {
+  it("a candidate whose batch-upsert RPC fails is reported as a failure, not counted as succeeded", async () => {
     const supabase = mockSupabase({ failUpsertForCandidate: CANDIDATE_A });
     const summary = await runMatchingForActiveCandidates(supabase);
 
@@ -185,13 +232,14 @@ describe("runMatchingForActiveCandidates", () => {
     await expect(runMatchingForActiveCandidates(supabase)).rejects.toThrow(/connection reset/);
   });
 
-  it("zero candidates -> a zeroed summary, no crash, no upsert attempted", async () => {
+  it("zero candidates -> a zeroed summary, no crash, no RPC call attempted", async () => {
     const supabase = mockSupabase({ candidateIds: [] });
     const summary = await runMatchingForActiveCandidates(supabase);
 
     expect(summary.candidatesConsidered).toBe(0);
     expect(summary.candidatesSucceeded).toBe(0);
     expect(summary.candidatesFailed).toBe(0);
+    expect(summary.resumePassesConsidered).toBe(0);
     expect(summary.totalOpportunitiesEvaluated).toBe(0);
     expect(summary.perCandidate).toEqual([]);
     expect(summary.failures).toEqual([]);
