@@ -6,24 +6,32 @@
 // the rest of the batch. matchEngine.ts, runMatchingForCandidate.ts, and
 // the pure mappers are untouched — see their own files.
 //
-// "ACTIVE CANDIDATES" — DECISION, NOT AN ASSUMPTION:
+// "ACTIVE CANDIDATES" — the decision, now made:
 // public.candidate.profile_status ('incomplete'/'active'/'paused'/
-// 'archived') is set to 'incomplete' exactly once, by
-// handle_new_auth_user() (0006_signup_provisioning.sql), and is never
-// written anywhere else in this codebase — no route or script ever
-// transitions it. Filtering on profile_status = 'active' would therefore
-// match zero candidates today, silently turning this into a no-op. This
-// module deliberately does NOT do that. Instead, per the P0 audit's
-// documented recommendation, "active" is defined as "every row in
-// public.candidate" — matching runMatchingForCandidate.ts's own existing
-// tolerance for sparse/missing candidate data (empty skills/education/
-// experience/projects and a null work_authorization all resolve to
-// eligibility 'unknown' rather than an error; see matchEngine.ts). A
-// candidate who has only just signed up is matched with zero signal and
-// gets an honest "unknown" feed entry, not skipped. Redefining/wiring
-// profile_status into a real lifecycle is a separate, later decision —
-// this module does not attempt it, and does not read or filter on
-// profile_status at all, so that decision remains fully open.
+// 'archived') used to be written exactly once, by handle_new_auth_user()
+// (0006_signup_provisioning.sql), and never read or transitioned anywhere
+// else — this module deliberately did NOT filter on it, since doing so
+// would have silently matched zero candidates. That is no longer true:
+// routes/profile.ts now auto-activates a candidate ('incomplete' ->
+// 'active') on their first successful profile save, and PATCH
+// /profile/status lets a candidate explicitly pause or archive their own
+// profile. profile_status is a real, candidate-controlled signal now, so
+// this module filters on it:
+//
+//   - 'incomplete' is included. A candidate who has only just signed up
+//     and never saved a profile still gets matched with zero signal,
+//     producing an honest "unknown" eligibility feed entry rather than
+//     being skipped — this preserves runMatchingForCandidate.ts's own
+//     existing tolerance for sparse/missing candidate data (empty
+//     skills/education/experience/projects and a null work_authorization
+//     all resolve to eligibility 'unknown' rather than an error; see
+//     matchEngine.ts).
+//   - 'active' is included, obviously.
+//   - 'paused' and 'archived' are EXCLUDED. This is the entire point of
+//     having a candidate-controlled status at all: a candidate who has
+//     explicitly paused (e.g. taking a break from the search) or archived
+//     their profile should stop consuming daily matching runs, not keep
+//     silently accumulating opportunity_match rows they never asked for.
 //
 // CALLER IS SERVICE-ROLE: same posture as runMatchingForCandidate.ts —
 // written for an operator/scheduler-triggered, cross-candidate
@@ -38,6 +46,10 @@ import {
 } from "./runMatchingForCandidate.js";
 
 const CANDIDATE_ID_COLUMN = "id";
+
+// Keep in sync with the profile_status filtering rule documented above —
+// 'paused' and 'archived' are the only statuses deliberately left out.
+const MATCHABLE_PROFILE_STATUSES = ["incomplete", "active"] as const;
 
 export interface CandidateMatchOutcome {
   candidateId: string;
@@ -78,7 +90,10 @@ export class RunMatchingCandidateListError extends Error {
 }
 
 async function loadAllCandidateIds(supabase: Pick<SupabaseClient, "from">): Promise<string[]> {
-  const { data, error } = await supabase.from("candidate").select(CANDIDATE_ID_COLUMN);
+  const { data, error } = await supabase
+    .from("candidate")
+    .select(CANDIDATE_ID_COLUMN)
+    .in("profile_status", MATCHABLE_PROFILE_STATUSES);
 
   if (error) {
     throw new RunMatchingCandidateListError(`Failed to load candidate list: ${error.message}`);

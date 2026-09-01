@@ -1,6 +1,15 @@
 import { h, toast, errorMessage } from "../lib/dom";
 import { renderShell } from "../lib/shell";
-import { listConsents, grantConsent, exportAccount, deleteAccount, type ConsentRecord, type ConsentType } from "../lib/api";
+import {
+  listConsents,
+  grantConsent,
+  exportAccount,
+  deleteAccount,
+  getProfile,
+  updateProfileStatus,
+  type ConsentRecord,
+  type ConsentType,
+} from "../lib/api";
 import { navigate } from "../lib/router";
 import { signOut } from "../lib/auth";
 
@@ -67,6 +76,62 @@ export async function renderSettings(root: HTMLElement) {
     });
   }
   await loadConsents();
+
+  main.append(h("h2", { class: "section-title" }, ["Matching"]));
+  const matchingCard = h("div", { class: "card" }, [h("div", { class: "empty" }, ["Loading…"])]);
+  main.append(matchingCard);
+
+  async function loadMatchingStatus() {
+    matchingCard.innerHTML = "";
+    let profileStatus: string;
+    try {
+      ({
+        candidate: { profile_status: profileStatus },
+      } = await getProfile());
+    } catch (err) {
+      matchingCard.append(h("div", { class: "form-error" }, [errorMessage(err)]));
+      return;
+    }
+
+    // 'archived' isn't reachable from any UI control yet (see
+    // PausableProfileStatus in api.ts), so there's nothing this toggle
+    // could correctly offer here — PATCH /profile/status would just 409.
+    if (profileStatus === "archived") {
+      matchingCard.append(h("div", { class: "empty" }, ["This profile is archived."]));
+      return;
+    }
+
+    const isPaused = profileStatus === "paused";
+    matchingCard.append(
+      h("div", { class: "spread" }, [
+        h("div", {}, [
+          h("div", { style: "font-weight:600" }, [isPaused ? "Matching is paused" : "Matching is active"]),
+          h("div", { class: "subtle" }, [
+            isPaused
+              ? "You won't receive new daily matches until you resume."
+              : "You're receiving new daily matches based on your profile.",
+          ]),
+        ]),
+        h(
+          "button",
+          {
+            class: "btn btn--small",
+            onClick: async () => {
+              try {
+                await updateProfileStatus(isPaused ? "active" : "paused");
+                toast(isPaused ? "Matching resumed." : "Matching paused.");
+                await loadMatchingStatus();
+              } catch (err) {
+                toast(errorMessage(err), "error");
+              }
+            },
+          },
+          [isPaused ? "Resume matching" : "Pause matching"],
+        ),
+      ]),
+    );
+  }
+  await loadMatchingStatus();
 
   main.append(h("h2", { class: "section-title" }, ["Your data"]));
   main.append(

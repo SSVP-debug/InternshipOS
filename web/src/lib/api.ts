@@ -92,6 +92,19 @@ export interface PersonalInfo {
 export const getProfile = () => get<{ candidate: Candidate; personal_info: PersonalInfo | null }>("/profile");
 export const saveProfile = (data: PersonalInfo) => post<{ message: string }>("/profile", data);
 
+// Only "active" and "paused" are exposed here — these are the two states
+// the product actually gives a candidate a reason to choose between
+// (settings.ts's pause/resume matching toggle). "archived" is a valid
+// PATCH /profile/status target on the backend, but is deliberately not
+// wired into any UI control yet: DELETE /account already covers "remove
+// me", and archived's own product meaning (distinct from either that or
+// a pause) hasn't been defined. "incomplete" isn't included because the
+// backend itself rejects it as a PATCH target — it's a one-way initial
+// default, not something a candidate transitions back to.
+export type PausableProfileStatus = "active" | "paused";
+export const updateProfileStatus = (profile_status: PausableProfileStatus) =>
+  patch<{ message: string; profile_status: string }>("/profile/status", { profile_status });
+
 export type ConsentType = "data_processing" | "github_oauth_access" | "llm_processing" | "document_upload_storage";
 export interface ConsentRecord {
   consent_type: ConsentType;

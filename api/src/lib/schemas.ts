@@ -36,6 +36,18 @@ export const ConsentRequestSchema = z.object({
 });
 export type ConsentRequest = z.infer<typeof ConsentRequestSchema>;
 
+// candidate.profile_status mirrors the check constraint in
+// 0002_candidate.sql: 'incomplete' | 'active' | 'paused' | 'archived'.
+// 'incomplete' is deliberately excluded here — it's the row's initial
+// default and is only ever left automatically (on first successful
+// POST /profile save, see routes/profile.ts), never a target a candidate
+// can PATCH back to. See PATCH /profile/status for the 'archived' ->
+// anything block, which this schema alone can't express.
+export const ProfileStatusUpdateSchema = z.object({
+  profile_status: z.enum(["active", "paused", "archived"]),
+});
+export type ProfileStatusUpdateRequest = z.infer<typeof ProfileStatusUpdateSchema>;
+
 // ── Education (Day 2) ───────────────────────────────────────────────────
 // Mirrors the check constraints in 0007_education.sql — validated at the
 // API boundary too, same "fail fast with a clear message" pattern used for

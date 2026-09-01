@@ -3,6 +3,7 @@ import {
   SignupRequestSchema,
   PersonalInfoRequestSchema,
   ConsentRequestSchema,
+  ProfileStatusUpdateSchema,
 } from "../src/lib/schemas.js";
 
 describe("SignupRequestSchema", () => {
@@ -85,6 +86,24 @@ describe("ConsentRequestSchema", () => {
 
   it("rejects an unrecognized consent_type", () => {
     const result = ConsentRequestSchema.safeParse({ consent_type: "marketing_emails" });
+    expect(result.success).toBe(false);
+  });
+});
+
+describe("ProfileStatusUpdateSchema", () => {
+  it("accepts each candidate-settable profile_status value", () => {
+    for (const status of ["active", "paused", "archived"]) {
+      expect(ProfileStatusUpdateSchema.safeParse({ profile_status: status }).success).toBe(true);
+    }
+  });
+
+  it("rejects 'incomplete' — it's the initial default, never a PATCH target", () => {
+    const result = ProfileStatusUpdateSchema.safeParse({ profile_status: "incomplete" });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects an unrecognized profile_status", () => {
+    const result = ProfileStatusUpdateSchema.safeParse({ profile_status: "on_hold" });
     expect(result.success).toBe(false);
   });
 });

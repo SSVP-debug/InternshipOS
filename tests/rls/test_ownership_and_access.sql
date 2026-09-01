@@ -251,7 +251,68 @@ begin
   raise notice 'PASS: duplicate active consent of the same type is rejected by the unique index';
 end $$;
 
-\echo '--- Test 10: service_role can operate across candidates (trusted backend path) ---'
+\echo '--- Test 10: candidate can UPDATE their own profile_status ---'
+-- Exercises candidate_update_own (0005_rls_policies.sql) for the first
+-- time in this suite. That policy has existed since Day 1 with no column
+-- restriction, but nothing wrote through it until routes/profile.ts's
+-- POST /profile auto-activation and PATCH /profile/status were added.
+do $$
+declare v_uid uuid; v_cand uuid; v_status text;
+begin
+  select val into v_uid from test_ids where key = 'user_a';
+  select val into v_cand from test_ids where key = 'cand_a';
+  perform set_config('request.jwt.claims', json_build_object('sub', v_uid)::text, true);
+  set local role authenticated;
+  update public.candidate set profile_status = 'paused' where id = v_cand;
+  select profile_status into v_status from public.candidate where id = v_cand;
+  reset role;
+  if v_status is distinct from 'paused' then
+    raise exception 'FAIL: candidate could not update their own profile_status (got %)', v_status;
+  end if;
+  raise notice 'PASS: candidate can update their own profile_status';
+end $$;
+
+\echo '--- Test 11: candidate CANNOT update another candidate''s profile_status (cross-candidate UPDATE blocked) ---'
+do $$
+declare v_uid uuid; v_cand_b uuid; v_status_before text; v_status_after text;
+begin
+  select val into v_uid from test_ids where key = 'user_a';
+  select val into v_cand_b from test_ids where key = 'cand_b';
+  select profile_status into v_status_before from public.candidate where id = v_cand_b;
+
+  perform set_config('request.jwt.claims', json_build_object('sub', v_uid)::text, true);
+  set local role authenticated;
+  -- RLS silently filters this UPDATE to zero matching rows rather than
+  -- erroring — same "no visible row, no error" shape as the cross-
+  -- candidate SELECT in Test 2, so this asserts the row is unchanged
+  -- rather than expecting an exception.
+  update public.candidate set profile_status = 'archived' where id = v_cand_b;
+  reset role;
+
+  select profile_status into v_status_after from public.candidate where id = v_cand_b;
+  if v_status_after is distinct from v_status_before then
+    raise exception 'FAIL: user A updated user B''s profile_status via RLS bypass (% -> %)',
+      v_status_before, v_status_after;
+  end if;
+  raise notice 'PASS: user A cannot update user B''s profile_status';
+end $$;
+
+\echo '--- Test 12: service_role can update profile_status across candidates (trusted backend path) ---'
+do $$
+declare v_cand_b uuid; v_status text;
+begin
+  select val into v_cand_b from test_ids where key = 'cand_b';
+  set local role service_role;
+  update public.candidate set profile_status = 'active' where id = v_cand_b;
+  select profile_status into v_status from public.candidate where id = v_cand_b;
+  reset role;
+  if v_status is distinct from 'active' then
+    raise exception 'FAIL: service_role could not update profile_status across candidates (got %)', v_status;
+  end if;
+  raise notice 'PASS: service_role (trusted backend only) can update profile_status across candidates';
+end $$;
+
+\echo '--- Test 13: service_role can read across candidates (trusted backend path) ---'
 do $$
 declare v_count int;
 begin

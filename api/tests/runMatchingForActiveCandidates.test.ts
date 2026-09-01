@@ -50,16 +50,20 @@ function mockSupabase(options: {
   // queried per call chain so failReadForCandidate/failUpsertForCandidate
   // can target one candidate without affecting the others.
   let currentCandidateId: string | null = null;
+  const inCalls: { column: string; values: readonly string[] }[] = [];
 
   const from = vi.fn((table: string) => {
     if (table === "candidate") {
       return {
-        select: vi.fn(() => {
-          if (options.candidateListError) {
-            return Promise.resolve({ data: null, error: options.candidateListError });
-          }
-          return Promise.resolve({ data: candidateIds.map((id) => ({ id })), error: null });
-        }),
+        select: vi.fn(() => ({
+          in: vi.fn((column: string, values: readonly string[]) => {
+            inCalls.push({ column, values });
+            if (options.candidateListError) {
+              return Promise.resolve({ data: null, error: options.candidateListError });
+            }
+            return Promise.resolve({ data: candidateIds.map((id) => ({ id })), error: null });
+          }),
+        })),
       };
     }
 
@@ -115,7 +119,7 @@ function mockSupabase(options: {
     };
   });
 
-  return { from } as any;
+  return { from, __inCalls: inCalls } as any;
 }
 
 describe("runMatchingForActiveCandidates", () => {
@@ -129,6 +133,13 @@ describe("runMatchingForActiveCandidates", () => {
     expect(summary.perCandidate.map((c) => c.candidateId).sort()).toEqual(
       [CANDIDATE_A, CANDIDATE_B, CANDIDATE_C].sort()
     );
+  });
+
+  it("filters the candidate query to profile_status in ('incomplete','active') — pausing/archiving opts a candidate out of the daily batch", async () => {
+    const supabase = mockSupabase();
+    await runMatchingForActiveCandidates(supabase);
+
+    expect(supabase.__inCalls).toEqual([{ column: "profile_status", values: ["incomplete", "active"] }]);
   });
 
   it("aggregates opportunitiesEvaluated, insertedOrUpdated, and eligibilityCounts across all candidates", async () => {
