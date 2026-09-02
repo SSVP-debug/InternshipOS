@@ -60,6 +60,13 @@ function queryResult(data: unknown, error: { message: string; code?: string } | 
   builder.order = self;
   builder.limit = self;
   builder.update = self;
+  // Gate R3: .is("resume_id", null) / .not("resume_id", "is", null) — same
+  // no-op-chain-but-still-resolve-to-`result` treatment as .eq/.in/.order
+  // above; these tests assert on the resolved data, not on exactly which
+  // filter methods PostgREST received (that's covered by the dedicated
+  // eqSpy/isSpy-style tests below where the distinction actually matters).
+  builder.is = self;
+  builder.not = self;
   builder.single = async () => result;
   builder.maybeSingle = async () => result;
   builder.then = (resolve: (v: typeof result) => unknown) => Promise.resolve(result).then(resolve);
@@ -98,6 +105,10 @@ function makeSupabaseMock(opts: {
   sourceList?: { data: unknown; error: { message: string } | null };
   updateResult?: { data: unknown; error: { message: string } | null };
   ownedOpportunity?: { data: unknown; error: { message: string } | null };
+  // Gate R3
+  activeResumeList?: { data: unknown; error: { message: string } | null };
+  resumeOwnership?: { data: unknown; error: { message: string } | null };
+  resumeScopedMatchList?: { data: unknown; error: { message: string } | null };
 } = {}) {
   const {
     candidate = { id: CANDIDATE_ID },
@@ -105,6 +116,9 @@ function makeSupabaseMock(opts: {
     sourceList = { data: [ACTIVE_SOURCE_ROW], error: null },
     updateResult = { data: { ...MATCH_ROW, inbox_status: "saved" }, error: null },
     ownedOpportunity = { data: { id: "owned-opportunity-1" }, error: null },
+    activeResumeList = { data: [], error: null },
+    resumeOwnership = { data: { id: "resume-1" }, error: null },
+    resumeScopedMatchList = { data: [], error: null },
   } = opts;
 
   const fromSpy = vi.fn();
@@ -116,7 +130,18 @@ function makeSupabaseMock(opts: {
     }
     if (table === "opportunity_match") {
       return {
-        select: () => queryResult(matchList.data, matchList.error),
+        // Gate R3: this table now serves two different SELECT shapes —
+        // the items query (OPPORTUNITY_MATCH_COLUMNS) and the
+        // resume_groups counting query (a short, hand-written column
+        // list). Distinguished here by inspecting the columns string
+        // passed to .select(), since that's the only signal available —
+        // the actual route never gives these two queries a chance to be
+        // confused with each other (see opportunity-feed.ts's own
+        // comments on why they're kept as separate queries).
+        select: (cols: string) =>
+          cols.includes("resume_id, opportunity_source_id, eligibility_status")
+            ? queryResult(resumeScopedMatchList.data, resumeScopedMatchList.error)
+            : queryResult(matchList.data, matchList.error),
         update: () => ({
           eq: () => ({
             eq: () => ({
@@ -131,6 +156,19 @@ function makeSupabaseMock(opts: {
     }
     if (table === "opportunity") {
       return { select: () => ({ eq: () => ({ maybeSingle: async () => ownedOpportunity }) }) };
+    }
+    if (table === "resume") {
+      // Gate R3: .eq("id", ...) is the ?resume_id ownership check
+      // (terminal .maybeSingle()); .eq("is_active", true) is the
+      // resume_groups list (implicitly awaited, no .maybeSingle()).
+      // Distinguished by which column .eq() was called with, since that's
+      // exactly how the route itself decides which query it's building.
+      return {
+        select: () => ({
+          eq: (col: string) =>
+            col === "id" ? { maybeSingle: async () => resumeOwnership } : Promise.resolve(activeResumeList),
+        }),
+      };
     }
     return queryResult([], null);
   };
@@ -269,6 +307,171 @@ describe("GET /opportunity-feed", () => {
 
   it("surfaces a Supabase error on the opportunity_source query as a 400", async () => {
     const supabase = makeSupabaseMock({ sourceList: { data: null, error: { message: "timeout" } } });
+    const req = { supabase } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("get", "/opportunity-feed"), req, res);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+  });
+
+  // ── Gate R3 ──────────────────────────────────────────────────────────
+
+  it("Gate R3: with no active resumes, resume_groups is an empty array — payload otherwise unchanged", async () => {
+    const supabase = makeSupabaseMock(); // activeResumeList defaults to []
+    const req = { supabase } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("get", "/opportunity-feed"), req, res);
+
+    const body = res.body as { resume_groups: unknown[] };
+    expect(body.resume_groups).toEqual([]);
+  });
+
+  it("Gate R3: default request (no ?resume_id) queries items with resume_id IS NULL, not filtered by a specific resume", async () => {
+    const isSpy = vi.fn();
+    const supabase = {
+      from: (table: string) => {
+        if (table === "candidate") {
+          return { select: () => ({ single: async () => ({ data: { id: CANDIDATE_ID }, error: null }) }) };
+        }
+        if (table === "opportunity_match") {
+          return {
+            select: (cols: string) => {
+              if (cols.includes("resume_id, opportunity_source_id")) return queryResult([], null);
+              const qr = queryResult([MATCH_ROW], null);
+              const originalIs = qr.is as (...args: unknown[]) => unknown;
+              qr.is = (...args: unknown[]) => {
+                isSpy(...args);
+                return originalIs(...args);
+              };
+              return qr;
+            },
+          };
+        }
+        if (table === "opportunity_source") return { select: () => queryResult([ACTIVE_SOURCE_ROW], null) };
+        if (table === "resume") return { select: () => ({ eq: () => Promise.resolve({ data: [], error: null }) }) };
+        return queryResult([], null);
+      },
+    };
+    const req = { supabase } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("get", "/opportunity-feed"), req, res);
+
+    expect(isSpy).toHaveBeenCalledWith("resume_id", null);
+  });
+
+  it("Gate R3: ?resume_id=<uuid> filters items to that resume, after confirming ownership", async () => {
+    const RESUME_ID = "88888888-8888-8888-8888-888888888888";
+    const eqSpy = vi.fn();
+    const supabase = {
+      from: (table: string) => {
+        if (table === "candidate") {
+          return { select: () => ({ single: async () => ({ data: { id: CANDIDATE_ID }, error: null }) }) };
+        }
+        if (table === "resume") {
+          return {
+            select: () => ({
+              eq: (col: string, val: string) => {
+                eqSpy(col, val);
+                return { maybeSingle: async () => ({ data: { id: RESUME_ID }, error: null }) };
+              },
+            }),
+          };
+        }
+        if (table === "opportunity_match") {
+          return {
+            select: (cols: string) => {
+              if (cols.includes("resume_id, opportunity_source_id")) return queryResult([], null);
+              const qr = queryResult([{ ...MATCH_ROW }], null);
+              const originalEq = qr.eq as (...args: unknown[]) => unknown;
+              qr.eq = (...args: unknown[]) => {
+                eqSpy(...args);
+                return originalEq(...args);
+              };
+              return qr;
+            },
+          };
+        }
+        if (table === "opportunity_source") return { select: () => queryResult([ACTIVE_SOURCE_ROW], null) };
+        return queryResult([], null);
+      },
+    };
+    const req = { supabase, query: { resume_id: RESUME_ID } } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("get", "/opportunity-feed"), req, res);
+
+    expect(res.status).toHaveBeenCalledWith(200);
+    // The ownership lookup itself (resume table) uses .eq("id", RESUME_ID).
+    expect(eqSpy).toHaveBeenCalledWith("id", RESUME_ID);
+  });
+
+  it("Gate R3: an unowned/nonexistent ?resume_id is a 404, not an empty feed", async () => {
+    const supabase = makeSupabaseMock({ resumeOwnership: { data: null, error: null } });
+    const req = { supabase, query: { resume_id: "88888888-8888-8888-8888-888888888888" } } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("get", "/opportunity-feed"), req, res);
+
+    expect(res.status).toHaveBeenCalledWith(404);
+    expect((res.body as { error: string }).error).toBe("resume_not_found");
+  });
+
+  it("Gate R3: a malformed ?resume_id is a 400 before touching the database", async () => {
+    const supabase = makeSupabaseMock();
+    const req = { supabase, query: { resume_id: "not-a-uuid" } } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("get", "/opportunity-feed"), req, res);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect((res.body as { error: string }).error).toBe("invalid_resume_id");
+    expect(supabase.fromSpy).not.toHaveBeenCalledWith("resume");
+  });
+
+  it("Gate R3: resume_groups summarizes total/eligible matches per active resume, counting only rows against still-active opportunities", async () => {
+    const RESUME_A = "99999999-9999-9999-9999-999999999999";
+    const OTHER_SOURCE_ID = "source-2-archived";
+    const supabase = makeSupabaseMock({
+      activeResumeList: {
+        data: [{ id: RESUME_A, label: "Software Development", target_role_category: "Software Engineering" }],
+        error: null,
+      },
+      resumeScopedMatchList: {
+        data: [
+          { resume_id: RESUME_A, opportunity_source_id: SOURCE_ID, eligibility_status: "eligible" },
+          { resume_id: RESUME_A, opportunity_source_id: SOURCE_ID, eligibility_status: "unknown" },
+          // References a source that never comes back from the
+          // opportunity_source query (i.e. no longer active) — must NOT
+          // be counted, same rule buildOpportunityFeed applies to items.
+          { resume_id: RESUME_A, opportunity_source_id: OTHER_SOURCE_ID, eligibility_status: "eligible" },
+        ],
+        error: null,
+      },
+    });
+    const req = { supabase } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("get", "/opportunity-feed"), req, res);
+
+    const body = res.body as {
+      resume_groups: Array<{ resume_id: string; label: string; total_matches: number; eligible_matches: number }>;
+    };
+    expect(body.resume_groups).toEqual([
+      {
+        resume_id: RESUME_A,
+        label: "Software Development",
+        target_role_category: "Software Engineering",
+        total_matches: 2,
+        eligible_matches: 1,
+      },
+    ]);
+  });
+
+  it("Gate R3: surfaces a Supabase error on the active-resume list query as a 400", async () => {
+    const supabase = makeSupabaseMock({ activeResumeList: { data: null, error: { message: "connection reset" } } });
     const req = { supabase } as unknown as AuthedRequest;
     const res = makeRes();
 
