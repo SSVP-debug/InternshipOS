@@ -60,6 +60,11 @@ function queryResult(data: unknown, error: { message: string } | null = null) {
   builder.order = self;
   builder.limit = self;
   builder.single = async () => result;
+  // Gate R3: .is("resume_id", null) / .not("resume_id", "is", null) —
+  // same no-op-chain-but-still-resolve-to-`result` treatment as the
+  // other filter methods above.
+  builder.is = self;
+  builder.not = self;
   builder.then = (resolve: (v: typeof result) => unknown) => Promise.resolve(result).then(resolve);
   return builder;
 }
@@ -98,6 +103,9 @@ function makeSupabaseMock(
     matches?: { data: unknown; error: { message: string } | null };
     sources?: { data: unknown; error: { message: string } | null };
     freshness?: { data: unknown; error: { message: string } | null };
+    // Gate R3
+    resumeMatches?: { data: unknown; error: { message: string } | null };
+    activeResumes?: { data: unknown; error: { message: string } | null };
   } = {},
 ) {
   const {
@@ -107,6 +115,8 @@ function makeSupabaseMock(
     matches = { data: [NEW_MATCH_ROW], error: null },
     sources = { data: [ACTIVE_SOURCE_ROW], error: null },
     freshness = { data: [{ last_seen_at: "2026-08-29T09:00:00Z" }], error: null },
+    resumeMatches = { data: [], error: null },
+    activeResumes = { data: [], error: null },
   } = opts;
 
   const from = (table: string) => {
@@ -115,7 +125,20 @@ function makeSupabaseMock(
     }
     if (table === "application") return { select: () => queryResult(applications.data, applications.error) };
     if (table === "opportunity") return { select: () => queryResult(opportunities.data, opportunities.error) };
-    if (table === "opportunity_match") return { select: () => queryResult(matches.data, matches.error) };
+    if (table === "opportunity_match") {
+      // Gate R3: this table now serves two different SELECT shapes — the
+      // candidate-level query (OPPORTUNITY_MATCH_COLUMNS, no resume_id)
+      // and the resume-scoped query (RESUME_SCOPED_MATCH_COLUMNS, which
+      // appends ", resume_id"). Dispatched on the columns string, same
+      // technique already used for opportunity_source's two shapes below
+      // — the route itself never confuses these two queries with each
+      // other, so neither should the mock.
+      return {
+        select: (cols: string) =>
+          cols.includes("resume_id") ? queryResult(resumeMatches.data, resumeMatches.error) : queryResult(matches.data, matches.error),
+      };
+    }
+    if (table === "resume") return { select: () => queryResult(activeResumes.data, activeResumes.error) };
     if (table === "opportunity_source") {
       // Two distinct queries against this table (see today.ts): the
       // freshness fetch selects only "last_seen_at"; the per-match-source
@@ -165,6 +188,7 @@ describe("GET /today — feed_summary wiring", () => {
       new_matches_count: 0,
       top_matches: [],
       last_ingested_at: "2026-08-29T09:00:00Z",
+      resume_highlights: [],
     });
   });
 
@@ -281,5 +305,146 @@ describe("GET /today — feed_summary wiring", () => {
     expect(res.status).toHaveBeenCalledWith(200);
     const body = res.body as { deadlines_approaching: unknown[] };
     expect(body.deadlines_approaching).toHaveLength(1);
+  });
+
+  // ── Gate R3 ──────────────────────────────────────────────────────────
+
+  it("Gate R3: the candidate-level opportunity_match query filters resume_id IS NULL — the correctness fix this gate made", async () => {
+    const isSpy = vi.fn();
+    const supabase = {
+      from: (table: string) => {
+        if (table === "candidate") return { select: () => ({ single: async () => ({ data: { id: CANDIDATE_ID }, error: null }) }) };
+        if (table === "application") return { select: () => queryResult([], null) };
+        if (table === "opportunity") return { select: () => queryResult([], null) };
+        if (table === "resume") return { select: () => queryResult([], null) };
+        if (table === "opportunity_match") {
+          return {
+            select: (cols: string) => {
+              if (cols.includes("resume_id")) return queryResult([], null); // resume-scoped query
+              const qr = queryResult([NEW_MATCH_ROW], null);
+              const originalIs = qr.is as (...args: unknown[]) => unknown;
+              qr.is = (...args: unknown[]) => {
+                isSpy(...args);
+                return originalIs(...args);
+              };
+              return qr;
+            },
+          };
+        }
+        if (table === "opportunity_source") {
+          return {
+            select: (cols: string) =>
+              cols === "last_seen_at" ? queryResult([{ last_seen_at: "2026-08-29T09:00:00Z" }], null) : queryResult([ACTIVE_SOURCE_ROW], null),
+          };
+        }
+        return queryResult([], null);
+      },
+    };
+    const req = { supabase } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("get", "/today"), req, res);
+
+    expect(isSpy).toHaveBeenCalledWith("resume_id", null);
+  });
+
+  it("Gate R3: resume_highlights reflects each active resume's own scoped matches, joined against the same active sources", async () => {
+    const RESUME_ID = "resume-1";
+    const RESUME_SOURCE_ID = "source-resume-1";
+    const RESUME_SOURCE_ROW = { ...ACTIVE_SOURCE_ROW, id: RESUME_SOURCE_ID, title: "AI Research Intern" };
+    const RESUME_MATCH_ROW = {
+      id: "match-resume-1",
+      opportunity_source_id: RESUME_SOURCE_ID,
+      match_score: 92,
+      eligibility_status: "eligible",
+      match_breakdown: {},
+      inbox_status: "new",
+      is_priority: false,
+      promoted_opportunity_id: null,
+      resume_id: RESUME_ID,
+    };
+    const supabase = makeSupabaseMock({
+      activeResumes: { data: [{ id: RESUME_ID, label: "AI/ML", target_role_category: "Machine Learning" }], error: null },
+      resumeMatches: { data: [RESUME_MATCH_ROW], error: null },
+      sources: { data: [ACTIVE_SOURCE_ROW, RESUME_SOURCE_ROW], error: null },
+    });
+    const req = { supabase } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("get", "/today"), req, res);
+
+    expect(res.status).toHaveBeenCalledWith(200);
+    const body = res.body as {
+      feed_summary: {
+        resume_highlights: Array<{
+          resume_id: string;
+          label: string;
+          target_role_category: string | null;
+          new_matches_count: number;
+          top_matches: Array<{ title: string }>;
+        }>;
+      };
+    };
+    expect(body.feed_summary.resume_highlights).toEqual([
+      {
+        resume_id: RESUME_ID,
+        label: "AI/ML",
+        target_role_category: "Machine Learning",
+        new_matches_count: 1,
+        top_matches: [expect.objectContaining({ title: "AI Research Intern" })],
+      },
+    ]);
+    // The flat feed_summary (candidate-level) is unaffected by the resume's own matches.
+    expect(body.feed_summary).toHaveProperty("new_matches_count", 1); // from the default NEW_MATCH_ROW
+  });
+
+  it("Gate R3: an active resume with zero matches still appears in resume_highlights, not omitted", async () => {
+    const supabase = makeSupabaseMock({
+      activeResumes: { data: [{ id: "resume-empty", label: "Data Science", target_role_category: null }], error: null },
+      resumeMatches: { data: [], error: null },
+    });
+    const req = { supabase } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("get", "/today"), req, res);
+
+    const body = res.body as { feed_summary: { resume_highlights: Array<{ resume_id: string; new_matches_count: number }> } };
+    expect(body.feed_summary.resume_highlights).toEqual([
+      { resume_id: "resume-empty", label: "Data Science", target_role_category: null, new_matches_count: 0, top_matches: [] },
+    ]);
+  });
+
+  it("Gate R3: returns 400 when the resume-scoped opportunity_match fetch fails", async () => {
+    const supabase = makeSupabaseMock({ resumeMatches: { data: null, error: { message: "connection reset" } } });
+    const req = { supabase } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("get", "/today"), req, res);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect((res.body as { error: string }).error).toBe("today_fetch_failed");
+  });
+
+  it("Gate R3: returns 400 when the active-resume list fetch fails", async () => {
+    const supabase = makeSupabaseMock({ activeResumes: { data: null, error: { message: "timeout" } } });
+    const req = { supabase } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("get", "/today"), req, res);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect((res.body as { error: string }).error).toBe("today_fetch_failed");
+  });
+
+  it("Gate R3: no active resumes -> resume_highlights is [] and no resume/resume-scoped-match wiring changes the flat feed_summary", async () => {
+    const supabase = makeSupabaseMock(); // activeResumes defaults to []
+    const req = { supabase } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("get", "/today"), req, res);
+
+    const body = res.body as { feed_summary: { resume_highlights: unknown[]; new_matches_count: number } };
+    expect(body.feed_summary.resume_highlights).toEqual([]);
+    expect(body.feed_summary.new_matches_count).toBe(1); // unchanged from the pre-Gate-R3 baseline test above
   });
 });

@@ -44,6 +44,16 @@ export interface OpportunityRow {
   is_priority: boolean;
 }
 
+export interface TodayFeedResumeGroup {
+  resumeId: string;
+  label: string;
+  targetRoleCategory: string | null;
+  // Same contract as TodayViewInput.feedItems: expected already sorted
+  // match_score descending (buildOpportunityFeed's own guarantee) — this
+  // module never re-sorts, for either the flat feed or a resume group.
+  items: OpportunityFeedItem[];
+}
+
 export interface TodayViewInput {
   applications: ApplicationRow[];
   opportunities: OpportunityRow[];
@@ -54,6 +64,12 @@ export interface TodayViewInput {
   // ordering buildOpportunityFeed() itself guarantees — this function does
   // not re-sort.
   feedItems?: OpportunityFeedItem[];
+  // Gate R3 — optional, defaults to []. One entry per active resume the
+  // caller wants highlighted; each entry's `items` should already be
+  // filtered to that resume_id and joined against active opportunity_source
+  // rows (see today.ts) — this module has no database access and does no
+  // filtering/joining of its own, same separation-of-concerns as feedItems.
+  resumeFeedGroups?: TodayFeedResumeGroup[];
   // Optional — the most recent opportunity_source.last_seen_at the caller
   // can see (RLS-scoped to active rows; see today.ts). A simple, honest
   // "when did the catalog last get fresh data" signal, computed from data
@@ -131,11 +147,26 @@ export interface TodayFeedHighlight {
   eligibility_status: "eligible" | "ineligible" | "unknown";
 }
 
+export interface TodayResumeFeedHighlight {
+  resume_id: string;
+  label: string;
+  target_role_category: string | null;
+  new_matches_count: number;
+  top_matches: TodayFeedHighlight[];
+}
+
 export interface TodayFeedSummary {
   // Matches the candidate hasn't triaged yet (inbox_status === "new") and
   // hasn't already turned into an application. Deliberately excludes
   // ineligible matches — an "ineligible" match isn't something that needs
   // the candidate's attention today, it's already resolved.
+  //
+  // Gate R3: this and top_matches below are computed from the
+  // candidate-level (resume_id IS NULL) match set only — identical
+  // meaning to before Gate R2/R3 existed. Per-resume highlights are
+  // reported separately in resume_highlights, not folded in here, for
+  // the same "don't change what existing consumers already see by
+  // default" reasoning opportunity-feed.ts's own default view follows.
   new_matches_count: number;
   top_matches: TodayFeedHighlight[];
   // See TodayViewInput.lastIngestedAt — passed through unchanged, not
@@ -143,6 +174,18 @@ export interface TodayFeedSummary {
   // not "unknown" — the frontend can render that as "not yet run" rather
   // than a loading/error state.
   last_ingested_at: string | null;
+  // Gate R3: one entry per candidate's ACTIVE resume (archived resumes
+  // are omitted — same "skip archived" rule the batch matching
+  // orchestrator applies, see runMatchingForActiveCandidates.ts), each
+  // summarized with the exact same rules as the flat feed above (never a
+  // second, differently-tuned notion of "actionable"). A resume with
+  // zero current matches still gets an entry here (new_matches_count: 0,
+  // top_matches: []) rather than being omitted — a candidate who just
+  // created a resume and hasn't been matched yet should see that
+  // resume listed as "nothing yet," not have it silently disappear from
+  // the dashboard. Always [] for a candidate with no active resumes —
+  // i.e. unchanged payload for the vast majority of candidates today.
+  resume_highlights: TodayResumeFeedHighlight[];
 }
 
 export interface TodayView {
@@ -165,18 +208,21 @@ export interface TodayView {
 
 const TOP_FEED_MATCHES_LIMIT = 3;
 
-function summarizeFeedForToday(feedItems: OpportunityFeedItem[], lastIngestedAt: string | null): TodayFeedSummary {
-  // Matches already promoted into an application, or already resolved as
-  // ineligible, don't need to surface here — this section exists to
-  // prompt "you have something new to look at," not to duplicate the
-  // full feed.
-  const actionable = feedItems.filter(
+/**
+ * The actual "what's actionable" rule, shared unchanged between the flat
+ * feed_summary and every resume_highlights entry (Gate R3) — the whole
+ * point of extracting this out of summarizeFeedForToday is that there is
+ * exactly one definition of "actionable," never a per-resume variant that
+ * could quietly drift from the flat one.
+ */
+function summarizeItems(items: OpportunityFeedItem[]): { newMatchesCount: number; topMatches: TodayFeedHighlight[] } {
+  const actionable = items.filter(
     (item) => item.eligibility_status !== "ineligible" && item.promoted_opportunity_id === null,
   );
 
   const newMatchesCount = actionable.filter((item) => item.inbox_status === "new").length;
 
-  // feedItems is expected to already be sorted match_score descending (see
+  // items is expected to already be sorted match_score descending (see
   // buildOpportunityFeed) — slicing here relies on that ordering rather
   // than re-sorting it, since this is meant to be a cheap, pure summary,
   // not a second ranking implementation to keep in sync with the first.
@@ -188,13 +234,44 @@ function summarizeFeedForToday(feedItems: OpportunityFeedItem[], lastIngestedAt:
     eligibility_status: item.eligibility_status,
   }));
 
-  return { new_matches_count: newMatchesCount, top_matches: topMatches, last_ingested_at: lastIngestedAt };
+  return { newMatchesCount, topMatches };
+}
+
+function summarizeFeedForToday(
+  feedItems: OpportunityFeedItem[],
+  lastIngestedAt: string | null,
+  resumeFeedGroups: TodayFeedResumeGroup[],
+): TodayFeedSummary {
+  // Matches already promoted into an application, or already resolved as
+  // ineligible, don't need to surface here — this section exists to
+  // prompt "you have something new to look at," not to duplicate the
+  // full feed.
+  const { newMatchesCount, topMatches } = summarizeItems(feedItems);
+
+  const resumeHighlights: TodayResumeFeedHighlight[] = resumeFeedGroups.map((group) => {
+    const { newMatchesCount: groupNewMatchesCount, topMatches: groupTopMatches } = summarizeItems(group.items);
+    return {
+      resume_id: group.resumeId,
+      label: group.label,
+      target_role_category: group.targetRoleCategory,
+      new_matches_count: groupNewMatchesCount,
+      top_matches: groupTopMatches,
+    };
+  });
+
+  return {
+    new_matches_count: newMatchesCount,
+    top_matches: topMatches,
+    last_ingested_at: lastIngestedAt,
+    resume_highlights: resumeHighlights,
+  };
 }
 
 export function buildTodayView({
   applications,
   opportunities,
   feedItems = [],
+  resumeFeedGroups = [],
   lastIngestedAt = null,
   now,
 }: TodayViewInput): TodayView {
@@ -317,7 +394,7 @@ export function buildTodayView({
     saved_opportunities: savedOpportunities,
     recently_applied: recentlyApplied,
     pipeline_summary: pipelineSummary,
-    feed_summary: summarizeFeedForToday(feedItems, lastIngestedAt),
+    feed_summary: summarizeFeedForToday(feedItems, lastIngestedAt, resumeFeedGroups),
     stats: {
       total_applications: applications.length,
       active_applications: activeApplications,

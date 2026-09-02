@@ -276,7 +276,12 @@ describe("buildTodayView — feed_summary", () => {
 
   it("defaults to an empty feed_summary when feedItems is omitted entirely", () => {
     const view = buildTodayView({ applications: [], opportunities: [], now: NOW });
-    expect(view.feed_summary).toEqual({ new_matches_count: 0, top_matches: [], last_ingested_at: null });
+    expect(view.feed_summary).toEqual({
+      new_matches_count: 0,
+      top_matches: [],
+      last_ingested_at: null,
+      resume_highlights: [],
+    });
   });
 
   it("counts only 'new' inbox_status matches toward new_matches_count", () => {
@@ -352,5 +357,101 @@ describe("buildTodayView — feed_summary", () => {
   it("an explicit null lastIngestedAt (ingestion has never run) is preserved, not silently swapped for a default", () => {
     const view = buildTodayView({ applications: [], opportunities: [], lastIngestedAt: null, now: NOW });
     expect(view.feed_summary.last_ingested_at).toBeNull();
+  });
+
+  // ── Gate R3: resume_highlights ─────────────────────────────────────
+
+  it("Gate R3: defaults resume_highlights to [] when resumeFeedGroups is omitted — unchanged payload for candidates with no resumes", () => {
+    const view = buildTodayView({
+      applications: [],
+      opportunities: [],
+      feedItems: [feedItem({ opportunity_match_id: "m1" })],
+      now: NOW,
+    });
+    expect(view.feed_summary.resume_highlights).toEqual([]);
+  });
+
+  it("Gate R3: one resume_highlights entry per resume group, applying the SAME actionable/new-count rules as the flat feed", () => {
+    const view = buildTodayView({
+      applications: [],
+      opportunities: [],
+      feedItems: [],
+      resumeFeedGroups: [
+        {
+          resumeId: "resume-1",
+          label: "Software Development",
+          targetRoleCategory: "Software Engineering",
+          items: [
+            feedItem({ opportunity_match_id: "r1-m1", inbox_status: "new" }),
+            feedItem({ opportunity_match_id: "r1-m2", inbox_status: "saved" }),
+            // Ineligible and already-promoted matches must be excluded
+            // here exactly like they are in the flat feed — same
+            // summarizeItems() call underneath, not a re-implementation.
+            feedItem({ opportunity_match_id: "r1-m3", eligibility_status: "ineligible" }),
+            feedItem({ opportunity_match_id: "r1-m4", promoted_opportunity_id: "app-1" }),
+          ],
+        },
+      ],
+      now: NOW,
+    });
+
+    expect(view.feed_summary.resume_highlights).toEqual([
+      {
+        resume_id: "resume-1",
+        label: "Software Development",
+        target_role_category: "Software Engineering",
+        new_matches_count: 1,
+        top_matches: [
+          expect.objectContaining({ opportunity_match_id: "r1-m1" }),
+          expect.objectContaining({ opportunity_match_id: "r1-m2" }),
+        ],
+      },
+    ]);
+  });
+
+  it("Gate R3: a resume with zero current matches still gets an entry (new_matches_count: 0, top_matches: []), not omitted", () => {
+    const view = buildTodayView({
+      applications: [],
+      opportunities: [],
+      feedItems: [],
+      resumeFeedGroups: [{ resumeId: "resume-empty", label: "AI/ML", targetRoleCategory: null, items: [] }],
+      now: NOW,
+    });
+
+    expect(view.feed_summary.resume_highlights).toEqual([
+      { resume_id: "resume-empty", label: "AI/ML", target_role_category: null, new_matches_count: 0, top_matches: [] },
+    ]);
+  });
+
+  it("Gate R3: multiple resumes each get their own independent highlight, in the order given", () => {
+    const view = buildTodayView({
+      applications: [],
+      opportunities: [],
+      feedItems: [feedItem({ opportunity_match_id: "flat-m1" })], // flat feed is untouched by resume groups
+      resumeFeedGroups: [
+        {
+          resumeId: "resume-a",
+          label: "Software Development",
+          targetRoleCategory: null,
+          items: [feedItem({ opportunity_match_id: "a-m1", inbox_status: "new" })],
+        },
+        {
+          resumeId: "resume-b",
+          label: "Data Science",
+          targetRoleCategory: null,
+          items: [
+            feedItem({ opportunity_match_id: "b-m1", inbox_status: "new" }),
+            feedItem({ opportunity_match_id: "b-m2", inbox_status: "new" }),
+          ],
+        },
+      ],
+      now: NOW,
+    });
+
+    expect(view.feed_summary.new_matches_count).toBe(1); // flat feed unaffected
+    expect(view.feed_summary.resume_highlights.map((h) => [h.resume_id, h.new_matches_count])).toEqual([
+      ["resume-a", 1],
+      ["resume-b", 2],
+    ]);
   });
 });
