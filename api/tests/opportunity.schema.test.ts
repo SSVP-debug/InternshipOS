@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { OpportunityRequestSchema, OpportunityInboxUpdateSchema } from "../src/lib/schemas.js";
+import { OpportunityRequestSchema, OpportunityInboxUpdateSchema, BulkApplyRequestSchema } from "../src/lib/schemas.js";
 
 const validBase = {
   title: "Software Engineering Intern",
@@ -118,6 +118,42 @@ describe("OpportunityInboxUpdateSchema", () => {
 
   it("rejects an invalid inbox_status value", () => {
     const result = OpportunityInboxUpdateSchema.safeParse({ inbox_status: "archived" });
+    expect(result.success).toBe(false);
+  });
+});
+
+describe("BulkApplyRequestSchema (Gate R5)", () => {
+  const id = (n: number) => `${String(n).padStart(8, "0")}-1111-1111-1111-111111111111`;
+
+  it("accepts a single opportunity_match_id", () => {
+    const result = BulkApplyRequestSchema.safeParse({ opportunity_match_ids: [id(1)] });
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts up to 20 opportunity_match_ids", () => {
+    const ids = Array.from({ length: 20 }, (_, i) => id(i + 1));
+    const result = BulkApplyRequestSchema.safeParse({ opportunity_match_ids: ids });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects more than 20 opportunity_match_ids", () => {
+    const ids = Array.from({ length: 21 }, (_, i) => id(i + 1));
+    const result = BulkApplyRequestSchema.safeParse({ opportunity_match_ids: ids });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects an empty array", () => {
+    const result = BulkApplyRequestSchema.safeParse({ opportunity_match_ids: [] });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects a non-UUID entry", () => {
+    const result = BulkApplyRequestSchema.safeParse({ opportunity_match_ids: ["not-a-uuid"] });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects a missing opportunity_match_ids field", () => {
+    const result = BulkApplyRequestSchema.safeParse({});
     expect(result.success).toBe(false);
   });
 });

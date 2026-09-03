@@ -14,6 +14,7 @@
 //                                               /opportunities/:id/inbox,
 //                                               against opportunity_match
 //                                               instead.
+// POST  /opportunity-matches/bulk-apply      — Gate R5, see below.
 //
 // Same ownership pattern as every other route: every query runs through
 // req.supabase (the caller's own JWT), so RLS — not this code — prevents
@@ -23,8 +24,7 @@
 // route only reads and re-shapes them, plus the two candidate-triage
 // fields it's allowed to update.
 //
-// GATE R3 — RESUME-SCOPED FEED (your explicit decision, confirmed before
-// this gate started):
+// GATE R3 — RESUME-SCOPED FEED:
 //   - Default request (no ?resume_id): `items` is UNCHANGED — the
 //     candidate-level matches (resume_id IS NULL), byte-for-byte the same
 //     query and response shape a candidate without any resumes has always
@@ -47,10 +47,47 @@
 //     NOT full items-per-resume (that's what ?resume_id is for) — see its
 //     own comment below for why counting is capped rather than a true
 //     SQL GROUP BY.
+//
+// GATE R5 — POST /opportunity-matches/bulk-apply: turns 1–20 selected
+// opportunity_match rows into applications in a single request. Before
+// this gate, "applying" from a match required three separate manual
+// steps (see OpportunityInboxUpdateSchema's promoted_opportunity_id
+// comment in schemas.ts): POST /opportunities to copy the posting's
+// details into a candidate-owned row, PATCH .../inbox to record
+// promoted_opportunity_id, then POST /applications. This endpoint does
+// all three per selected match, atomically per item (not one giant
+// transaction across all items — see the route's own comments on why),
+// with per-item failure isolation matching the batch matching
+// orchestrator's own convention (runMatchingForActiveCandidates.ts): one
+// item failing (or already having been applied to) never aborts the
+// rest of the request.
+//
+// resume_id is carried automatically from each opportunity_match row's
+// own resume_id (set back in Gate R2) onto the application it produces —
+// this is what makes the endpoint "scoped to one resume" in the sense
+// the plan meant: the candidate selects matches from one resume's
+// grouped view (Gate R3's resume_groups /?resume_id), and every
+// application created here remembers that resume without the caller
+// needing to pass resume_id explicitly (contrast with POST
+// /applications directly, which Gate R4 made explicit specifically
+// because that route has no opportunity_match context to carry it from).
+//
+// DEDUP (0028_opportunity_source_provenance.sql): if the candidate
+// already has an `opportunity` row for the same opportunity_source
+// (whether from a previous bulk-apply, a different resume's match for
+// the same posting, or a prior manual entry that happens to carry the
+// same opportunity_source_id), that existing opportunity is reused
+// rather than creating a duplicate — enforced by a DB-level partial
+// unique index, not just this route's own check-then-insert logic (see
+// that migration's header). If an application already exists for that
+// reused opportunity (unique_violation on candidate_id+opportunity_id,
+// 0018_application.sql's own long-standing constraint), the item is
+// reported as "already_applied", not a hard failure.
 
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { Router } from "express";
 import type { AuthedRequest } from "../middleware/auth.js";
-import { OpportunityInboxUpdateSchema, UuidParamSchema } from "../lib/schemas.js";
+import { OpportunityInboxUpdateSchema, BulkApplyRequestSchema, UuidParamSchema } from "../lib/schemas.js";
 import {
   buildOpportunityFeed,
   type OpportunityMatchRow,
@@ -90,6 +127,241 @@ async function getOwnCandidateId(req: AuthedRequest): Promise<string | null> {
   const { data, error } = await req.supabase!.from("candidate").select("id").single();
   if (error || !data) return null;
   return data.id as string;
+}
+
+// Gate R5: opportunity_source.source_type -> opportunity.source. Not a
+// 1:1 rename — opportunity_source's enum ('job_board', 'company_site',
+// 'manual_seed', 'other') predates and is unrelated to opportunity's own
+// ('manual', 'referral', 'company_site', 'job_board', 'career_fair',
+// 'other'), so 'manual_seed' has no direct equivalent and falls back to
+// 'other' rather than 'manual' — 'manual' specifically means the
+// candidate typed it in themselves (0017_opportunity.sql), which this
+// auto-created row was not.
+const OPPORTUNITY_SOURCE_TYPE_TO_OPPORTUNITY_SOURCE: Record<string, string> = {
+  job_board: "job_board",
+  company_site: "company_site",
+  manual_seed: "other",
+  other: "other",
+};
+
+// Gate R5: every opportunity_source column bulk-apply needs to populate a
+// new candidate-owned `opportunity` row — a superset of both
+// OPPORTUNITY_MATCH_COLUMNS's join needs and the feed's own
+// OPPORTUNITY_SOURCE_COLUMNS above (which is display-only and omits
+// description/skills/deadline_date/source_type — fields the feed never
+// shows but opportunity creation needs).
+const OPPORTUNITY_SOURCE_COLUMNS_FOR_APPLY =
+  "id, source_type, title, company, description, location, work_mode, employment_type, skills, application_url, deadline_date, posted_date";
+
+const UNIQUE_VIOLATION = "23505";
+
+interface BulkApplyResult {
+  opportunity_match_id: string;
+  status: "applied" | "already_applied" | "failed";
+  application_id?: string;
+  opportunity_id?: string;
+  error?: string;
+}
+
+/**
+ * One selected match, start to finish: find-or-create the candidate's own
+ * `opportunity` row for its underlying opportunity_source (dedup — see
+ * 0028_opportunity_source_provenance.sql), record promoted_opportunity_id
+ * on the match, create the application (carrying the match's own
+ * resume_id automatically), and seed its initial status event — mirroring
+ * POST /applications's own seeding step exactly, so an application
+ * created via bulk-apply has identical history-completeness to one
+ * created the old three-step manual way.
+ *
+ * Deliberately NOT one big transaction across every selected match (or
+ * even across one match's several writes) — this project has no
+ * multi-statement-transaction primitive available through the
+ * RLS-scoped PostgREST client (see 0026_opportunity_match_resume.sql's
+ * upsert_opportunity_match_batch for the one place this codebase reaches
+ * for a SQL function instead, when it actually needed atomicity a single
+ * INSERT could provide — this operation's several different writes,
+ * across three tables, don't fit that same shape). A failure partway
+ * through one match (e.g. the application insert fails after the
+ * opportunity was already created) leaves that opportunity row behind,
+ * unpromoted — not ideal, but recoverable (the next bulk-apply attempt on
+ * the same match reuses it via the dedup check, rather than erroring or
+ * duplicating), and honestly reported as "failed" rather than
+ * papered over.
+ */
+async function applyOneMatch(
+  supabase: Pick<SupabaseClient, "from">,
+  candidateId: string,
+  opportunityMatchId: string,
+): Promise<BulkApplyResult> {
+  const { data: match, error: matchError } = await supabase
+    .from("opportunity_match")
+    .select("id, opportunity_source_id, resume_id, promoted_opportunity_id")
+    .eq("id", opportunityMatchId)
+    .eq("candidate_id", candidateId)
+    .maybeSingle();
+
+  if (matchError) {
+    return { opportunity_match_id: opportunityMatchId, status: "failed", error: matchError.message };
+  }
+  if (!match) {
+    return { opportunity_match_id: opportunityMatchId, status: "failed", error: "opportunity_match_not_found" };
+  }
+  const matchRow = match as unknown as {
+    id: string;
+    opportunity_source_id: string;
+    resume_id: string | null;
+    promoted_opportunity_id: string | null;
+  };
+
+  if (matchRow.promoted_opportunity_id) {
+    return { opportunity_match_id: opportunityMatchId, status: "already_applied", opportunity_id: matchRow.promoted_opportunity_id };
+  }
+
+  // Dedup check (see migration header) — reuse an existing opportunity
+  // for this opportunity_source rather than creating a second one. The
+  // partial unique index is the actual guarantee; this SELECT is just
+  // avoiding a guaranteed-to-fail INSERT in the common repeat case.
+  const { data: existingOpportunity, error: existingLookupError } = await supabase
+    .from("opportunity")
+    .select("id")
+    .eq("candidate_id", candidateId)
+    .eq("opportunity_source_id", matchRow.opportunity_source_id)
+    .maybeSingle();
+
+  if (existingLookupError) {
+    return { opportunity_match_id: opportunityMatchId, status: "failed", error: existingLookupError.message };
+  }
+
+  let opportunityId: string;
+
+  if (existingOpportunity) {
+    opportunityId = (existingOpportunity as unknown as { id: string }).id;
+  } else {
+    const { data: sourceRow, error: sourceError } = await supabase
+      .from("opportunity_source")
+      .select(OPPORTUNITY_SOURCE_COLUMNS_FOR_APPLY)
+      .eq("id", matchRow.opportunity_source_id)
+      .maybeSingle();
+
+    if (sourceError) {
+      return { opportunity_match_id: opportunityMatchId, status: "failed", error: sourceError.message };
+    }
+    if (!sourceRow) {
+      // The posting was removed from the catalog between matching and
+      // apply — nothing to copy. Honest failure, not a fabricated
+      // opportunity built from whatever fields happen to be on the match
+      // row itself.
+      return { opportunity_match_id: opportunityMatchId, status: "failed", error: "opportunity_source_not_found" };
+    }
+    const source = sourceRow as unknown as {
+      id: string;
+      source_type: string;
+      title: string;
+      company: string;
+      description: string | null;
+      location: string | null;
+      work_mode: string | null;
+      employment_type: string;
+      skills: string[];
+      application_url: string | null;
+      deadline_date: string | null;
+      posted_date: string | null;
+    };
+
+    const { data: createdOpportunity, error: createError } = await supabase
+      .from("opportunity")
+      .insert({
+        candidate_id: candidateId,
+        opportunity_source_id: source.id,
+        title: source.title,
+        company: source.company,
+        description: source.description,
+        location: source.location,
+        work_mode: source.work_mode,
+        employment_type: source.employment_type,
+        skills: source.skills,
+        application_url: source.application_url,
+        source: OPPORTUNITY_SOURCE_TYPE_TO_OPPORTUNITY_SOURCE[source.source_type] ?? "other",
+        deadline_date: source.deadline_date,
+        posted_date: source.posted_date,
+        inbox_status: "saved", // the candidate is actively applying to it — never leave it sitting as "new"
+      })
+      .select("id")
+      .single();
+
+    if (createError) {
+      // Belt-and-braces: if a concurrent request already created this
+      // exact (candidate, opportunity_source) opportunity between our
+      // SELECT above and this INSERT, the partial unique index catches
+      // it here — re-read and reuse rather than surfacing a raw
+      // constraint violation to the caller.
+      if (createError.code === UNIQUE_VIOLATION) {
+        const { data: raceWinner, error: raceLookupError } = await supabase
+          .from("opportunity")
+          .select("id")
+          .eq("candidate_id", candidateId)
+          .eq("opportunity_source_id", matchRow.opportunity_source_id)
+          .maybeSingle();
+        if (raceLookupError || !raceWinner) {
+          return { opportunity_match_id: opportunityMatchId, status: "failed", error: createError.message };
+        }
+        opportunityId = (raceWinner as unknown as { id: string }).id;
+      } else {
+        return { opportunity_match_id: opportunityMatchId, status: "failed", error: createError.message };
+      }
+    } else {
+      opportunityId = (createdOpportunity as unknown as { id: string }).id;
+    }
+  }
+
+  // Record the promotion on the match — same field, same meaning, as the
+  // pre-Gate-R5 manual PATCH .../inbox flow (see schemas.ts's
+  // promoted_opportunity_id comment). Not fatal if this write fails: the
+  // application itself (below) is the record that actually matters, and
+  // is still created even if this housekeeping update doesn't stick —
+  // reported as part of the result either way, not silently swallowed.
+  const { error: promoteError } = await supabase
+    .from("opportunity_match")
+    .update({ promoted_opportunity_id: opportunityId })
+    .eq("id", opportunityMatchId)
+    .eq("candidate_id", candidateId);
+
+  const { data: createdApplication, error: applicationError } = await supabase
+    .from("application")
+    .insert({ candidate_id: candidateId, opportunity_id: opportunityId, resume_id: matchRow.resume_id })
+    .select("id, status")
+    .single();
+
+  if (applicationError) {
+    if (applicationError.code === UNIQUE_VIOLATION) {
+      return { opportunity_match_id: opportunityMatchId, status: "already_applied", opportunity_id: opportunityId };
+    }
+    return {
+      opportunity_match_id: opportunityMatchId,
+      status: "failed",
+      opportunity_id: opportunityId,
+      error: promoteError ? `${applicationError.message} (also failed to record promotion: ${promoteError.message})` : applicationError.message,
+    };
+  }
+
+  const application = createdApplication as unknown as { id: string; status: string };
+
+  // Seed the status history exactly like POST /applications does — an
+  // application created via bulk-apply must not have thinner history
+  // than one created the manual way.
+  await supabase.from("application_status_event").insert({
+    application_id: application.id,
+    candidate_id: candidateId,
+    from_status: null,
+    to_status: application.status,
+  });
+
+  return {
+    opportunity_match_id: opportunityMatchId,
+    status: "applied",
+    application_id: application.id,
+    opportunity_id: opportunityId,
+  };
 }
 
 export function opportunityFeedRouter(): Router {
@@ -305,6 +577,41 @@ export function opportunityFeedRouter(): Router {
       return res.status(404).json({ error: "opportunity_match_not_found" });
     }
     return res.status(200).json({ opportunity_match: data });
+  });
+
+  router.post("/opportunity-matches/bulk-apply", async (req: AuthedRequest, res) => {
+    const parsed = BulkApplyRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: "invalid_request", details: parsed.error.flatten() });
+    }
+
+    const supabase = req.supabase!;
+    const candidateId = await getOwnCandidateId(req);
+    if (!candidateId) {
+      return res.status(404).json({ error: "candidate_not_found" });
+    }
+
+    // Sequential, not Promise.all — each item does several dependent
+    // writes (opportunity, then match update, then application, then
+    // status event), and running 20 of those chains concurrently against
+    // the same RLS-scoped connection buys nothing (PostgREST has no
+    // client-side connection pooling to parallelize here) while making
+    // partial-failure reporting harder to reason about. Same "isolate
+    // one item's failure, keep going" posture as the batch matching
+    // orchestrator (runMatchingForActiveCandidates.ts), just sequential
+    // instead of already-independent-by-construction.
+    const results: BulkApplyResult[] = [];
+    for (const opportunityMatchId of parsed.data.opportunity_match_ids) {
+      results.push(await applyOneMatch(supabase, candidateId, opportunityMatchId));
+    }
+
+    const summary = {
+      applied: results.filter((r) => r.status === "applied").length,
+      already_applied: results.filter((r) => r.status === "already_applied").length,
+      failed: results.filter((r) => r.status === "failed").length,
+    };
+
+    return res.status(200).json({ results, summary });
   });
 
   return router;

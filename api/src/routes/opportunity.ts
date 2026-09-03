@@ -25,7 +25,13 @@ import { OpportunityRequestSchema, OpportunityInboxUpdateSchema, UuidParamSchema
 const OPPORTUNITY_COLUMNS =
   "id, title, company, description, location, work_mode, employment_type, skills, " +
   "application_url, source, deadline_date, posted_date, inbox_status, is_priority, " +
-  "created_at, updated_at";
+  "opportunity_source_id, created_at, updated_at";
+// Gate R5: opportunity_source_id is READ-ONLY at this route — it is never
+// part of OpportunityRequestSchema (see schemas.ts), so POST/PUT here can
+// never set or change it, even if a client includes it in the body (Zod
+// strips unknown fields). It's only ever written by POST
+// /opportunity-matches/bulk-apply (opportunity-feed.ts), which builds its
+// insert payload directly rather than going through this schema.
 
 async function getOwnCandidateId(req: AuthedRequest): Promise<string | null> {
   const { data, error } = await req.supabase!.from("candidate").select("id").single();

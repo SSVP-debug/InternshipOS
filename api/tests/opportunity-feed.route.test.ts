@@ -11,7 +11,7 @@ interface RouteLayer {
   };
 }
 
-function getHandlers(method: "get" | "patch", path: string) {
+function getHandlers(method: "get" | "patch" | "post", path: string) {
   const router = opportunityFeedRouter() as unknown as { stack: RouteLayer[] };
   const layer = router.stack.find((l) => l.route?.path === path && l.route?.methods[method]);
   if (!layer?.route) throw new Error(`no route registered for ${method.toUpperCase()} ${path}`);
@@ -676,5 +676,312 @@ describe("PATCH /opportunity-matches/:id/inbox", () => {
 
     expect(res.status).toHaveBeenCalledWith(400);
     expect(supabase.fromSpy).not.toHaveBeenCalled();
+  });
+});
+
+// ── Gate R5: POST /opportunity-matches/bulk-apply ──────────────────────
+
+const SOURCE_A_ID = "aaaaaaaa-0000-0000-0000-000000000001";
+const SOURCE_B_ID = "aaaaaaaa-0000-0000-0000-000000000002";
+const MATCH_A_ID = "bbbbbbbb-0000-0000-0000-000000000001";
+const MATCH_B_ID = "bbbbbbbb-0000-0000-0000-000000000002";
+const RESUME_ID = "cccccccc-0000-0000-0000-000000000001";
+
+const SOURCE_ROW_TEMPLATE = {
+  source_type: "job_board",
+  title: "Backend Intern",
+  company: "Acme Corp",
+  description: "Build things.",
+  location: "Remote",
+  work_mode: "remote",
+  employment_type: "internship",
+  skills: ["python"],
+  application_url: "https://acme.example/apply",
+  deadline_date: "2026-12-01",
+  posted_date: "2026-08-01",
+};
+
+/**
+ * Purpose-built mock for applyOneMatch's multi-table flow — distinct from
+ * this file's other makeSupabaseMock/queryResult helpers (built for
+ * GET/PATCH's simpler shapes) because bulk-apply's per-item flow touches
+ * five tables with genuinely different call shapes each. Keyed by id so
+ * a single mock instance can serve multi-item requests where different
+ * items need different mock behavior (e.g. one match already promoted,
+ * another not).
+ */
+function makeBulkApplyMock(opts: {
+  candidate?: { id: string } | null;
+  matches?: Record<string, { id: string; opportunity_source_id: string; resume_id: string | null; promoted_opportunity_id: string | null } | null>;
+  existingOpportunities?: Record<string, { id: string } | null>; // keyed by opportunity_source_id
+  sources?: Record<string, Record<string, unknown> | null>; // keyed by opportunity_source_id
+  createOpportunityError?: { message: string; code?: string } | null;
+  createApplicationError?: { message: string; code?: string } | null;
+  applicationInserts?: Array<Record<string, unknown>>; // spy target
+  opportunityInserts?: Array<Record<string, unknown>>; // spy target
+} = {}) {
+  const {
+    candidate = { id: CANDIDATE_ID },
+    matches = {},
+    existingOpportunities = {},
+    sources = {},
+    createOpportunityError = null,
+    createApplicationError = null,
+    applicationInserts = [],
+    opportunityInserts = [],
+  } = opts;
+
+  let opportunityInsertCount = 0;
+
+  return {
+    from(table: string) {
+      if (table === "candidate") {
+        return { select: () => ({ single: async () => ({ data: candidate, error: candidate ? null : { message: "not found" } }) }) };
+      }
+      if (table === "opportunity_match") {
+        return {
+          select: () => ({
+            eq: (_col1: string, matchId: string) => ({
+              eq: () => ({
+                maybeSingle: async () => {
+                  const m = matches[matchId];
+                  return { data: m ?? null, error: undefined };
+                },
+              }),
+            }),
+          }),
+          update: (payload: Record<string, unknown>) => ({
+            eq: () => ({ eq: async () => ({ data: [payload], error: null }) }),
+          }),
+        };
+      }
+      if (table === "opportunity") {
+        return {
+          select: () => ({
+            eq: (_c1: string, _candId: string) => ({
+              eq: (_c2: string, sourceId: string) => ({
+                maybeSingle: async () => ({ data: existingOpportunities[sourceId] ?? null, error: null }),
+              }),
+            }),
+          }),
+          insert: (payload: Record<string, unknown>) => {
+            opportunityInsertCount++;
+            opportunityInserts.push(payload);
+            return {
+              select: () => ({
+                single: async () => {
+                  if (createOpportunityError) return { data: null, error: createOpportunityError };
+                  return { data: { id: `created-opportunity-${opportunityInsertCount}` }, error: null };
+                },
+              }),
+            };
+          },
+        };
+      }
+      if (table === "opportunity_source") {
+        return {
+          select: () => ({
+            eq: (_c: string, sourceId: string) => ({
+              maybeSingle: async () => ({ data: sources[sourceId] ?? null, error: null }),
+            }),
+          }),
+        };
+      }
+      if (table === "application") {
+        return {
+          insert: (payload: Record<string, unknown>) => {
+            applicationInserts.push(payload);
+            return {
+              select: () => ({
+                single: async () => {
+                  if (createApplicationError) return { data: null, error: createApplicationError };
+                  return { data: { id: `app-${applicationInserts.length}`, status: "SAVED" }, error: null };
+                },
+              }),
+            };
+          },
+        };
+      }
+      if (table === "application_status_event") {
+        return { insert: () => queryResult(null, null) };
+      }
+      return queryResult([], null);
+    },
+  };
+}
+
+describe("POST /opportunity-matches/bulk-apply (Gate R5)", () => {
+  it("returns 400 for an empty opportunity_match_ids array before touching the database", async () => {
+    const supabase = makeBulkApplyMock();
+    const req = { supabase, body: { opportunity_match_ids: [] } } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("post", "/opportunity-matches/bulk-apply"), req, res);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+  });
+
+  it("returns 404 when the caller has no candidate row", async () => {
+    const supabase = makeBulkApplyMock({ candidate: null });
+    const req = { supabase, body: { opportunity_match_ids: [MATCH_A_ID] } } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("post", "/opportunity-matches/bulk-apply"), req, res);
+
+    expect(res.status).toHaveBeenCalledWith(404);
+  });
+
+  it("applies a single match: creates the opportunity from opportunity_source, promotes the match, and creates the application carrying the match's own resume_id", async () => {
+    const applicationInserts: Array<Record<string, unknown>> = [];
+    const opportunityInserts: Array<Record<string, unknown>> = [];
+    const supabase = makeBulkApplyMock({
+      matches: { [MATCH_A_ID]: { id: MATCH_A_ID, opportunity_source_id: SOURCE_A_ID, resume_id: RESUME_ID, promoted_opportunity_id: null } },
+      sources: { [SOURCE_A_ID]: { id: SOURCE_A_ID, ...SOURCE_ROW_TEMPLATE } },
+      applicationInserts,
+      opportunityInserts,
+    });
+    const req = { supabase, body: { opportunity_match_ids: [MATCH_A_ID] } } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("post", "/opportunity-matches/bulk-apply"), req, res);
+
+    expect(res.status).toHaveBeenCalledWith(200);
+    const body = res.body as { results: Array<{ status: string }>; summary: { applied: number } };
+    expect(body.results).toEqual([
+      expect.objectContaining({ opportunity_match_id: MATCH_A_ID, status: "applied" }),
+    ]);
+    expect(body.summary).toEqual({ applied: 1, already_applied: 0, failed: 0 });
+
+    expect(opportunityInserts[0]).toEqual(
+      expect.objectContaining({ candidate_id: CANDIDATE_ID, opportunity_source_id: SOURCE_A_ID, title: "Backend Intern" }),
+    );
+    // Gate R5's core promise: resume_id carried automatically, no client-supplied value needed.
+    expect(applicationInserts[0]).toEqual(
+      expect.objectContaining({ candidate_id: CANDIDATE_ID, resume_id: RESUME_ID }),
+    );
+  });
+
+  it("dedup: reuses an existing opportunity for the same opportunity_source instead of creating a second one", async () => {
+    const opportunityInserts: Array<Record<string, unknown>> = [];
+    const supabase = makeBulkApplyMock({
+      matches: { [MATCH_A_ID]: { id: MATCH_A_ID, opportunity_source_id: SOURCE_A_ID, resume_id: null, promoted_opportunity_id: null } },
+      existingOpportunities: { [SOURCE_A_ID]: { id: "already-existing-opportunity" } },
+      opportunityInserts,
+    });
+    const req = { supabase, body: { opportunity_match_ids: [MATCH_A_ID] } } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("post", "/opportunity-matches/bulk-apply"), req, res);
+
+    const body = res.body as { results: Array<{ opportunity_id?: string }> };
+    expect(body.results[0].opportunity_id).toBe("already-existing-opportunity");
+    expect(opportunityInserts).toHaveLength(0); // never created a duplicate
+  });
+
+  it("a match already promoted is reported as already_applied, not applied again", async () => {
+    const supabase = makeBulkApplyMock({
+      matches: {
+        [MATCH_A_ID]: { id: MATCH_A_ID, opportunity_source_id: SOURCE_A_ID, resume_id: null, promoted_opportunity_id: "prior-application-opportunity" },
+      },
+    });
+    const req = { supabase, body: { opportunity_match_ids: [MATCH_A_ID] } } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("post", "/opportunity-matches/bulk-apply"), req, res);
+
+    const body = res.body as { results: Array<{ status: string; opportunity_id?: string }>; summary: { already_applied: number } };
+    expect(body.results[0]).toEqual(
+      expect.objectContaining({ status: "already_applied", opportunity_id: "prior-application-opportunity" }),
+    );
+    expect(body.summary.already_applied).toBe(1);
+  });
+
+  it("a unique_violation on the application insert (existing application for the reused opportunity) is reported as already_applied, not failed", async () => {
+    const supabase = makeBulkApplyMock({
+      matches: { [MATCH_A_ID]: { id: MATCH_A_ID, opportunity_source_id: SOURCE_A_ID, resume_id: null, promoted_opportunity_id: null } },
+      existingOpportunities: { [SOURCE_A_ID]: { id: "already-existing-opportunity" } },
+      createApplicationError: { message: "duplicate key value", code: "23505" },
+    });
+    const req = { supabase, body: { opportunity_match_ids: [MATCH_A_ID] } } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("post", "/opportunity-matches/bulk-apply"), req, res);
+
+    const body = res.body as { results: Array<{ status: string }> };
+    expect(body.results[0].status).toBe("already_applied");
+  });
+
+  it("a nonexistent/unowned opportunity_match_id is reported as failed, isolated from the rest of the batch", async () => {
+    const supabase = makeBulkApplyMock({
+      matches: {
+        [MATCH_A_ID]: { id: MATCH_A_ID, opportunity_source_id: SOURCE_A_ID, resume_id: null, promoted_opportunity_id: null },
+        // MATCH_B_ID intentionally absent -> not found
+      },
+      sources: { [SOURCE_A_ID]: { id: SOURCE_A_ID, ...SOURCE_ROW_TEMPLATE } },
+    });
+    const req = { supabase, body: { opportunity_match_ids: [MATCH_A_ID, MATCH_B_ID] } } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("post", "/opportunity-matches/bulk-apply"), req, res);
+
+    expect(res.status).toHaveBeenCalledWith(200); // partial success is still a 200 — see summary for the breakdown
+    const body = res.body as { results: Array<{ opportunity_match_id: string; status: string }>; summary: Record<string, number> };
+    expect(body.results).toEqual([
+      expect.objectContaining({ opportunity_match_id: MATCH_A_ID, status: "applied" }),
+      expect.objectContaining({ opportunity_match_id: MATCH_B_ID, status: "failed", error: "opportunity_match_not_found" }),
+    ]);
+    expect(body.summary).toEqual({ applied: 1, already_applied: 0, failed: 1 });
+  });
+
+  it("a removed opportunity_source (posting gone between match and apply) is reported as failed, not fabricated from partial data", async () => {
+    const supabase = makeBulkApplyMock({
+      matches: { [MATCH_A_ID]: { id: MATCH_A_ID, opportunity_source_id: SOURCE_A_ID, resume_id: null, promoted_opportunity_id: null } },
+      sources: { [SOURCE_A_ID]: null },
+    });
+    const req = { supabase, body: { opportunity_match_ids: [MATCH_A_ID] } } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("post", "/opportunity-matches/bulk-apply"), req, res);
+
+    const body = res.body as { results: Array<{ status: string; error?: string }> };
+    expect(body.results[0]).toEqual(expect.objectContaining({ status: "failed", error: "opportunity_source_not_found" }));
+  });
+
+  it("two matches for two different resumes both succeed independently, each carrying its own resume_id", async () => {
+    const applicationInserts: Array<Record<string, unknown>> = [];
+    const supabase = makeBulkApplyMock({
+      matches: {
+        [MATCH_A_ID]: { id: MATCH_A_ID, opportunity_source_id: SOURCE_A_ID, resume_id: "resume-x", promoted_opportunity_id: null },
+        [MATCH_B_ID]: { id: MATCH_B_ID, opportunity_source_id: SOURCE_B_ID, resume_id: "resume-y", promoted_opportunity_id: null },
+      },
+      sources: {
+        [SOURCE_A_ID]: { id: SOURCE_A_ID, ...SOURCE_ROW_TEMPLATE },
+        [SOURCE_B_ID]: { id: SOURCE_B_ID, ...SOURCE_ROW_TEMPLATE, title: "Data Science Intern" },
+      },
+      applicationInserts,
+    });
+    const req = { supabase, body: { opportunity_match_ids: [MATCH_A_ID, MATCH_B_ID] } } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("post", "/opportunity-matches/bulk-apply"), req, res);
+
+    const body = res.body as { summary: Record<string, number> };
+    expect(body.summary).toEqual({ applied: 2, already_applied: 0, failed: 0 });
+    expect(applicationInserts.map((a) => a.resume_id)).toEqual(["resume-x", "resume-y"]);
+  });
+
+  it("maps opportunity_source.source_type 'manual_seed' to opportunity.source 'other', never 'manual' (which would misrepresent it as candidate-typed)", async () => {
+    const opportunityInserts: Array<Record<string, unknown>> = [];
+    const supabase = makeBulkApplyMock({
+      matches: { [MATCH_A_ID]: { id: MATCH_A_ID, opportunity_source_id: SOURCE_A_ID, resume_id: null, promoted_opportunity_id: null } },
+      sources: { [SOURCE_A_ID]: { id: SOURCE_A_ID, ...SOURCE_ROW_TEMPLATE, source_type: "manual_seed" } },
+      opportunityInserts,
+    });
+    const req = { supabase, body: { opportunity_match_ids: [MATCH_A_ID] } } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("post", "/opportunity-matches/bulk-apply"), req, res);
+
+    expect(opportunityInserts[0].source).toBe("other");
   });
 });

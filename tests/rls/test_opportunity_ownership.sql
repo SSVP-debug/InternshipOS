@@ -202,4 +202,126 @@ begin
   raise notice 'PASS: anon role reads zero opportunity rows (denied at grant or RLS layer)';
 end $$;
 
+\echo '--- Gate R5 setup: one opportunity_source row, shared across both candidates ---'
+do $$
+declare v_source_id uuid;
+begin
+  insert into public.opportunity_source (source_type, title, company, dedup_fingerprint, status)
+  values ('job_board', 'Platform Engineering Intern', 'Acme Corp', 'opp-test-source-1', 'active')
+  returning id into v_source_id;
+
+  insert into opp_test_ids values ('source_1', v_source_id);
+end $$;
+
+\echo '--- Test 9: candidate can INSERT an opportunity with opportunity_source_id set (provenance) ---'
+do $$
+declare v_uid uuid; v_cand uuid; v_source uuid; v_id uuid; v_stored_source uuid;
+begin
+  select val into v_uid from opp_test_ids where key = 'user_a';
+  select val into v_cand from opp_test_ids where key = 'cand_a';
+  select val into v_source from opp_test_ids where key = 'source_1';
+
+  perform set_config('request.jwt.claims', json_build_object('sub', v_uid)::text, true);
+  set local role authenticated;
+  insert into public.opportunity (candidate_id, title, company, opportunity_source_id)
+  values (v_cand, 'Platform Engineering Intern', 'Acme Corp', v_source)
+  returning id into v_id;
+  select opportunity_source_id into v_stored_source from public.opportunity where id = v_id;
+  reset role;
+
+  if v_stored_source != v_source then
+    raise exception 'FAIL: opportunity.opportunity_source_id did not persist as inserted';
+  end if;
+  raise notice 'PASS: candidate can insert an opportunity with opportunity_source_id set';
+
+  insert into opp_test_ids values ('opp_a_sourced', v_id);
+end $$;
+
+\echo '--- Test 10: a SECOND opportunity for the SAME (candidate, opportunity_source_id) is rejected — the actual dedup mechanism bulk-apply relies on ---'
+do $$
+declare v_uid uuid; v_cand uuid; v_source uuid; failed boolean := false;
+begin
+  select val into v_uid from opp_test_ids where key = 'user_a';
+  select val into v_cand from opp_test_ids where key = 'cand_a';
+  select val into v_source from opp_test_ids where key = 'source_1';
+
+  perform set_config('request.jwt.claims', json_build_object('sub', v_uid)::text, true);
+  set local role authenticated;
+  begin
+    insert into public.opportunity (candidate_id, title, company, opportunity_source_id)
+    values (v_cand, 'Duplicate Attempt', 'Acme Corp', v_source);
+  exception when unique_violation then
+    failed := true;
+  end;
+  reset role;
+
+  if not failed then
+    raise exception 'FAIL: a second opportunity for the same (candidate, opportunity_source_id) was accepted';
+  end if;
+  raise notice 'PASS: a duplicate (candidate, opportunity_source_id) opportunity is rejected (uq_opportunity_candidate_source)';
+end $$;
+
+\echo '--- Test 11: a DIFFERENT candidate CAN have their own opportunity for the SAME opportunity_source_id — the constraint is per-candidate, not global ---'
+do $$
+declare v_uid_b uuid; v_cand_b uuid; v_source uuid; v_id uuid; v_count int;
+begin
+  select val into v_uid_b from opp_test_ids where key = 'user_b';
+  select val into v_cand_b from opp_test_ids where key = 'cand_b';
+  select val into v_source from opp_test_ids where key = 'source_1';
+
+  perform set_config('request.jwt.claims', json_build_object('sub', v_uid_b)::text, true);
+  set local role authenticated;
+  insert into public.opportunity (candidate_id, title, company, opportunity_source_id)
+  values (v_cand_b, 'Platform Engineering Intern', 'Acme Corp', v_source)
+  returning id into v_id;
+  select count(*) into v_count from public.opportunity where opportunity_source_id = v_source;
+  reset role;
+
+  if v_count != 2 then
+    raise exception 'FAIL: expected 2 opportunities (one per candidate) sharing the same opportunity_source_id, got %', v_count;
+  end if;
+  raise notice 'PASS: two different candidates can each have their own opportunity for the same opportunity_source_id';
+end $$;
+
+\echo '--- Test 12: manually-entered opportunities (opportunity_source_id NULL) never collide with each other, even in bulk — the partial index means NULL is exempt ---'
+do $$
+declare v_uid uuid; v_cand uuid; v_count int;
+begin
+  select val into v_uid from opp_test_ids where key = 'user_a';
+  select val into v_cand from opp_test_ids where key = 'cand_a';
+
+  perform set_config('request.jwt.claims', json_build_object('sub', v_uid)::text, true);
+  set local role authenticated;
+  insert into public.opportunity (candidate_id, title, company) values (v_cand, 'Manual Entry One', 'Beta Inc');
+  insert into public.opportunity (candidate_id, title, company) values (v_cand, 'Manual Entry Two', 'Beta Inc');
+  select count(*) into v_count from public.opportunity where candidate_id = v_cand and opportunity_source_id is null;
+  reset role;
+
+  if v_count != 2 then
+    raise exception 'FAIL: expected 2 manually-entered (opportunity_source_id NULL) opportunities to coexist, got %', v_count;
+  end if;
+  raise notice 'PASS: manually-entered opportunities (opportunity_source_id NULL) never collide with each other';
+end $$;
+
+\echo '--- Test 13: deleting an opportunity_source sets opportunity.opportunity_source_id to NULL — the candidate''s own opportunity/application record survives ---'
+do $$
+declare v_uid uuid; v_source uuid; v_opp_id uuid; v_source_after uuid;
+begin
+  select val into v_uid from opp_test_ids where key = 'user_a';
+  select val into v_opp_id from opp_test_ids where key = 'opp_a_sourced';
+  select val into v_source from opp_test_ids where key = 'source_1';
+
+  delete from public.opportunity_source where id = v_source;
+
+  perform set_config('request.jwt.claims', json_build_object('sub', v_uid)::text, true);
+  set local role authenticated;
+  select opportunity_source_id into v_source_after from public.opportunity where id = v_opp_id;
+  reset role;
+
+  if v_source_after is not null then
+    raise exception 'FAIL: opportunity.opportunity_source_id was not cleared after its source was deleted (got %)', v_source_after;
+  end if;
+  raise notice 'PASS: deleting an opportunity_source clears opportunity.opportunity_source_id (ON DELETE SET NULL) without deleting the opportunity itself';
+end $$;
+
 \echo '--- ALL OPPORTUNITY TESTS PASSED ---'

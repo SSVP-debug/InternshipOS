@@ -331,6 +331,20 @@ export const OpportunityInboxUpdateSchema = z
   );
 export type OpportunityInboxUpdate = z.infer<typeof OpportunityInboxUpdateSchema>;
 
+// Gate R5 — POST /opportunity-matches/bulk-apply (opportunity-feed.ts).
+// Capped at 20 per request: this is a sequential, per-item, multi-query
+// operation (see the route's own comments on why it isn't parallelized —
+// failure isolation), not a single bulk SQL statement, so an unbounded
+// array would let one request do an unbounded amount of work. 20 covers
+// "apply to everything in one resume's feed" for any resume under
+// FEED_ITEM_LIMIT's own 50-item cap without the two limits needing to
+// match exactly — if this proves too small in practice it's a one-line
+// change, not a design problem.
+export const BulkApplyRequestSchema = z.object({
+  opportunity_match_ids: z.array(z.string().uuid()).min(1).max(20),
+});
+export type BulkApplyRequest = z.infer<typeof BulkApplyRequestSchema>;
+
 // ── Application (Phase 1) ────────────────────────────────────────────────
 // Mirrors 0018_application.sql. `status` is intentionally NOT part of the
 // create/update body — status changes go through the dedicated
