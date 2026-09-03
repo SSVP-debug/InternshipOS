@@ -23,6 +23,14 @@
 // Same ownership pattern as every other route: every query runs through
 // req.supabase (the caller's own JWT), so RLS — not this code — prevents
 // reading/writing another candidate's applications.
+//
+// GATE R4 — resume_id: tracking only (your explicit Gate R0 decision) —
+// which resume was used for an application, set explicitly by the
+// candidate at creation (POST) or correction (PUT), never inferred from
+// an opportunity_match row (see 0027_application_resume.sql's own
+// comment on why inference would be ambiguous). Same ownership-check
+// posture as opportunity_id: an RLS-scoped SELECT for a resume_id that
+// isn't the caller's own simply returns no row.
 
 import { Router } from "express";
 import type { AuthedRequest } from "../middleware/auth.js";
@@ -34,11 +42,22 @@ import {
 } from "../lib/schemas.js";
 
 const APPLICATION_COLUMNS =
-  "id, opportunity_id, status, applied_at, deadline_override, next_action_date, " +
+  "id, opportunity_id, resume_id, status, applied_at, deadline_override, next_action_date, " +
   "next_action_note, recruiter_name, recruiter_email, created_at, updated_at";
 
 const OPPORTUNITY_SUMMARY_COLUMNS =
   "id, title, company, location, work_mode, application_url, deadline_date";
+
+// Gate R4 — deliberately just id/label/target_role_category, not
+// evidence_source_id: the LIST endpoint (GET /applications) enriches
+// every row with this for a picker/badge UI ("Software Development"),
+// but doesn't need the file itself. The single-application view (GET
+// /applications/:id) additionally fetches evidence_source_id separately
+// (see below) — that's the one place "retrieve the actual resume file
+// used for this application" (the plan's original ask) actually applies,
+// and it's not worth carrying an unused evidence_source_id through every
+// row of a list response.
+const RESUME_SUMMARY_COLUMNS = "id, label, target_role_category";
 
 // Explicit row shapes for the two `*_COLUMNS` selects above. Needed
 // because those constants are built with string concatenation (for
@@ -53,6 +72,7 @@ const OPPORTUNITY_SUMMARY_COLUMNS =
 interface ApplicationDbRow {
   id: string;
   opportunity_id: string;
+  resume_id: string | null;
   status: string;
   applied_at: string | null;
   deadline_override: string | null;
@@ -72,6 +92,12 @@ interface OpportunitySummaryDbRow {
   work_mode: string | null;
   application_url: string | null;
   deadline_date: string | null;
+}
+
+interface ResumeSummaryDbRow {
+  id: string;
+  label: string;
+  target_role_category: string | null;
 }
 
 // Postgres check_violation, raised by check_application_status_transition()
@@ -123,9 +149,36 @@ export function applicationRouter(): Router {
       }
     }
 
+    // Gate R4: batch-fetch resume summaries the same way opportunities are
+    // batched above — one IN query for every distinct resume_id present,
+    // not one query per application.
+    const resumeIds = [...new Set(applications.map((a) => a.resume_id).filter((id): id is string => id !== null))];
+    const resumeById = new Map<string, ResumeSummaryDbRow>();
+    if (resumeIds.length > 0) {
+      const { data: resumes, error: resumeError } = await supabase
+        .from("resume")
+        .select(RESUME_SUMMARY_COLUMNS)
+        .in("id", resumeIds);
+      if (resumeError) {
+        return res.status(400).json({ error: "application_fetch_failed", message: resumeError.message });
+      }
+      for (const resume of (resumes ?? []) as unknown as ResumeSummaryDbRow[]) {
+        resumeById.set(resume.id, resume);
+      }
+    }
+
     const enriched = applications.map((a) => ({
       ...a,
       opportunity: opportunityById.get(a.opportunity_id) ?? null,
+      // Gate R4: null both when no resume was recorded AND when a
+      // recorded resume_id no longer resolves (e.g. it was deleted after
+      // ON DELETE SET NULL already cleared a.resume_id itself — this
+      // branch only matters for the brief window, if any, between that
+      // happening and this query running; there is no way for
+      // resume_id to be non-null here yet resolve to nothing under
+      // normal operation) — either way, "we don't know which resume" is
+      // the honest answer, not an error.
+      resume: a.resume_id ? (resumeById.get(a.resume_id) ?? null) : null,
     }));
 
     return res.status(200).json({ applications: enriched });
@@ -152,7 +205,7 @@ export function applicationRouter(): Router {
     }
     const application = applicationRaw as unknown as ApplicationDbRow;
 
-    const [opportunityResult, historyResult, notesResult] = await Promise.all([
+    const [opportunityResult, historyResult, notesResult, resumeResult] = await Promise.all([
       supabase.from("opportunity").select(OPPORTUNITY_SUMMARY_COLUMNS).eq("id", application.opportunity_id).maybeSingle(),
       supabase
         .from("application_status_event")
@@ -164,10 +217,23 @@ export function applicationRouter(): Router {
         .select("id, note_type, content, created_at, updated_at")
         .eq("application_id", idParsed.data)
         .order("created_at", { ascending: false }),
+      // Gate R4: this is the one place evidence_source_id is fetched —
+      // "retrieve the actual resume file used for this application," the
+      // plan's original ask for this gate. Skipped entirely (not even
+      // queried) when application.resume_id is null, same
+      // don't-query-what-you-don't-need pattern the opportunity/
+      // sourceIds fetches elsewhere in this codebase already follow.
+      application.resume_id
+        ? supabase
+            .from("resume")
+            .select("id, label, target_role_category, evidence_source_id")
+            .eq("id", application.resume_id)
+            .maybeSingle()
+        : Promise.resolve({ data: null, error: null }),
     ]);
 
-    if (opportunityResult.error || historyResult.error || notesResult.error) {
-      const firstError = opportunityResult.error ?? historyResult.error ?? notesResult.error;
+    if (opportunityResult.error || historyResult.error || notesResult.error || resumeResult.error) {
+      const firstError = opportunityResult.error ?? historyResult.error ?? notesResult.error ?? resumeResult.error;
       return res.status(400).json({ error: "application_fetch_failed", message: firstError!.message });
     }
 
@@ -175,6 +241,7 @@ export function applicationRouter(): Router {
       application: {
         ...application,
         opportunity: opportunityResult.data ?? null,
+        resume: resumeResult.data ?? null,
       },
       status_history: historyResult.data,
       notes: notesResult.data,
@@ -199,7 +266,7 @@ export function applicationRouter(): Router {
     // query also runs through the caller's own RLS-scoped client, a
     // foreign opportunity_id resolves to "not found" here, never leaking
     // whether it belongs to someone else.
-    const { opportunity_id, ...applicationFields } = parsed.data;
+    const { opportunity_id, resume_id, ...applicationFields } = parsed.data;
     const { data: opportunity, error: opportunityError } = await supabase
       .from("opportunity")
       .select("id")
@@ -213,12 +280,31 @@ export function applicationRouter(): Router {
       return res.status(404).json({ error: "opportunity_not_found" });
     }
 
+    // Gate R4: same ownership-check posture as opportunity_id immediately
+    // above — an RLS-scoped SELECT for a resume_id belonging to another
+    // candidate (or that doesn't exist) simply returns no row, which is
+    // used here as the check itself.
+    if (resume_id) {
+      const { data: ownedResume, error: resumeError } = await supabase
+        .from("resume")
+        .select("id")
+        .eq("id", resume_id)
+        .maybeSingle();
+
+      if (resumeError) {
+        return res.status(400).json({ error: "application_create_failed", message: resumeError.message });
+      }
+      if (!ownedResume) {
+        return res.status(404).json({ error: "resume_not_found" });
+      }
+    }
+
     // status is intentionally omitted — the column default ('SAVED')
     // applies, matching claim's "every new row starts at the initial
     // lifecycle state" convention.
     const { data: insertedRaw, error } = await supabase
       .from("application")
-      .insert({ candidate_id: candidateId, opportunity_id, ...applicationFields })
+      .insert({ candidate_id: candidateId, opportunity_id, resume_id: resume_id ?? null, ...applicationFields })
       .select(APPLICATION_COLUMNS)
       .single();
 
@@ -255,6 +341,28 @@ export function applicationRouter(): Router {
     }
 
     const supabase = req.supabase!;
+
+    // Gate R4: same ownership-check posture as POST /applications — only
+    // when the PUT is actually SETTING a resume_id (a truthy string).
+    // `undefined` (field omitted — leave resume_id untouched) and
+    // explicit `null` (clear it) both need no ownership check: there's
+    // nothing to verify ownership of when the candidate isn't pointing at
+    // a specific resume row.
+    if (parsed.data.resume_id) {
+      const { data: ownedResume, error: resumeError } = await supabase
+        .from("resume")
+        .select("id")
+        .eq("id", parsed.data.resume_id)
+        .maybeSingle();
+
+      if (resumeError) {
+        return res.status(400).json({ error: "application_update_failed", message: resumeError.message });
+      }
+      if (!ownedResume) {
+        return res.status(404).json({ error: "resume_not_found" });
+      }
+    }
+
     const { data, error } = await supabase
       .from("application")
       .update(parsed.data) // never includes status or opportunity_id

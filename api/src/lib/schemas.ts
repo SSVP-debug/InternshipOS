@@ -339,6 +339,11 @@ export type OpportunityInboxUpdate = z.infer<typeof OpportunityInboxUpdateSchema
 
 export const ApplicationCreateRequestSchema = z.object({
   opportunity_id: z.string().uuid(),
+  // Gate R4 — tracking only. Which resume this application was made
+  // with. Optional and explicit (not inferred from any opportunity_match
+  // row) — see 0027_application_resume.sql's own comment on why
+  // inference would be ambiguous.
+  resume_id: z.string().uuid().optional(),
   deadline_override: dateString.optional(),
   next_action_date: dateString.optional(),
   next_action_note: z.string().optional(),
@@ -349,8 +354,13 @@ export type ApplicationCreateRequest = z.infer<typeof ApplicationCreateRequestSc
 
 // PUT body — everything editable except opportunity_id (an application
 // doesn't get re-pointed at a different opportunity; withdraw and create a
-// new one instead) and status (see above).
+// new one instead) and status (see above). resume_id IS editable here —
+// unlike opportunity_id, correcting which resume was used after the fact
+// (the candidate picked the wrong one, or added a resume afterward) is a
+// legitimate, expected correction, not a "this is actually a different
+// application" case.
 export const ApplicationUpdateRequestSchema = z.object({
+  resume_id: z.string().uuid().nullable().optional(),
   deadline_override: dateString.optional(),
   next_action_date: dateString.optional(),
   next_action_note: z.string().optional(),

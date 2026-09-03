@@ -255,4 +255,101 @@ begin
   raise notice 'PASS: anon role reads zero application rows (denied at grant or RLS layer)';
 end $$;
 
+\echo '--- Gate R4 setup: one resume each for cand_a and cand_b, and a fresh opportunity for the coexistence test ---'
+do $$
+declare
+  v_cand_a uuid; v_cand_b uuid; v_resume_a_id uuid; v_resume_b_id uuid; v_opp_c uuid;
+begin
+  select val into v_cand_a from app_test_ids where key = 'cand_a';
+  select val into v_cand_b from app_test_ids where key = 'cand_b';
+
+  insert into public.resume (candidate_id, label) values (v_cand_a, 'Software Development')
+    returning id into v_resume_a_id;
+  insert into public.resume (candidate_id, label) values (v_cand_b, 'Data Science')
+    returning id into v_resume_b_id;
+
+  insert into public.opportunity (candidate_id, title, company)
+  values (v_cand_a, 'Platform Intern', 'Gamma LLC') returning id into v_opp_c;
+
+  insert into app_test_ids values
+    ('resume_a', v_resume_a_id), ('resume_b', v_resume_b_id), ('opp_c', v_opp_c);
+end $$;
+
+\echo '--- Test 10: candidate can create an application with resume_id set to their OWN resume ---'
+do $$
+declare v_uid uuid; v_cand uuid; v_opp uuid; v_resume uuid; v_id uuid; v_stored_resume uuid;
+begin
+  select val into v_uid from app_test_ids where key = 'user_a';
+  select val into v_cand from app_test_ids where key = 'cand_a';
+  select val into v_opp from app_test_ids where key = 'opp_c';
+  select val into v_resume from app_test_ids where key = 'resume_a';
+
+  perform set_config('request.jwt.claims', json_build_object('sub', v_uid)::text, true);
+  set local role authenticated;
+  insert into public.application (candidate_id, opportunity_id, resume_id)
+  values (v_cand, v_opp, v_resume)
+  returning id into v_id;
+  select resume_id into v_stored_resume from public.application where id = v_id;
+  reset role;
+
+  if v_stored_resume != v_resume then
+    raise exception 'FAIL: application.resume_id did not persist as inserted';
+  end if;
+  raise notice 'PASS: candidate can create an application with resume_id set to their own resume';
+end $$;
+
+\echo '--- Test 11: application.resume_id must belong to the SAME candidate as the application (trigger) ---'
+do $$
+declare v_uid_a uuid; v_cand_a uuid; v_opp uuid; v_resume_b uuid; failed boolean := false;
+begin
+  select val into v_uid_a from app_test_ids where key = 'user_a';
+  select val into v_cand_a from app_test_ids where key = 'cand_a';
+  select val into v_opp from app_test_ids where key = 'opp_a';
+  select val into v_resume_b from app_test_ids where key = 'resume_b'; -- belongs to cand_b, not cand_a
+
+  perform set_config('request.jwt.claims', json_build_object('sub', v_uid_a)::text, true);
+  set local role authenticated;
+  begin
+    insert into public.application (candidate_id, opportunity_id, resume_id)
+    values (v_cand_a, v_opp, v_resume_b);
+  exception when check_violation then
+    failed := true;
+  end;
+  reset role;
+
+  if not failed then
+    raise exception 'FAIL: an application was accepted with resume_id belonging to a DIFFERENT candidate';
+  end if;
+  raise notice 'PASS: application.resume_id must belong to the same candidate_id (trg_application_resume_candidate)';
+end $$;
+
+\echo '--- Test 12: deleting a resume sets resume_id to NULL on its applications — history preserved, not deleted or blocked ---'
+do $$
+declare v_uid uuid; v_cand uuid; v_opp uuid; v_resume uuid; v_app_id uuid; v_resume_after uuid; v_status_after text;
+begin
+  select val into v_uid from app_test_ids where key = 'user_a';
+  select val into v_cand from app_test_ids where key = 'cand_a';
+  select val into v_opp from app_test_ids where key = 'opp_a';
+
+  perform set_config('request.jwt.claims', json_build_object('sub', v_uid)::text, true);
+  set local role authenticated;
+  insert into public.resume (candidate_id, label) values (v_cand, 'Disposable Resume') returning id into v_resume;
+  insert into public.application (candidate_id, opportunity_id, resume_id)
+  values (v_cand, v_opp, v_resume)
+  returning id into v_app_id;
+
+  delete from public.resume where id = v_resume;
+
+  select resume_id, status into v_resume_after, v_status_after from public.application where id = v_app_id;
+  reset role;
+
+  if v_resume_after is not null then
+    raise exception 'FAIL: application.resume_id was not cleared after its resume was deleted (got %)', v_resume_after;
+  end if;
+  if v_status_after is null then
+    raise exception 'FAIL: the application row itself was deleted (or unreadable) when its resume was deleted — history was NOT preserved';
+  end if;
+  raise notice 'PASS: deleting a resume clears application.resume_id (ON DELETE SET NULL) without deleting the application itself';
+end $$;
+
 \echo '--- ALL APPLICATION TESTS PASSED ---'

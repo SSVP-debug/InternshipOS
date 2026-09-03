@@ -53,6 +53,32 @@ describe("ApplicationCreateRequestSchema", () => {
       expect((result.data as Record<string, unknown>).status).toBeUndefined();
     }
   });
+
+  // ── Gate R4: resume_id ──────────────────────────────────────────────
+
+  it("Gate R4: accepts an optional resume_id", () => {
+    const result = ApplicationCreateRequestSchema.safeParse({
+      opportunity_id: validOpportunityId,
+      resume_id: "22222222-2222-2222-2222-222222222222",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("Gate R4: resume_id is optional — omitting it is still a valid record", () => {
+    const result = ApplicationCreateRequestSchema.safeParse({ opportunity_id: validOpportunityId });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.resume_id).toBeUndefined();
+    }
+  });
+
+  it("Gate R4: rejects a non-UUID resume_id", () => {
+    const result = ApplicationCreateRequestSchema.safeParse({
+      opportunity_id: validOpportunityId,
+      resume_id: "not-a-uuid",
+    });
+    expect(result.success).toBe(false);
+  });
 });
 
 describe("ApplicationUpdateRequestSchema", () => {
@@ -77,6 +103,26 @@ describe("ApplicationUpdateRequestSchema", () => {
       expect((result.data as Record<string, unknown>).opportunity_id).toBeUndefined();
       expect((result.data as Record<string, unknown>).status).toBeUndefined();
     }
+  });
+
+  // ── Gate R4: resume_id IS editable here, unlike opportunity_id/status ──
+
+  it("Gate R4: accepts a resume_id to set/correct which resume was used", () => {
+    const result = ApplicationUpdateRequestSchema.safeParse({ resume_id: "22222222-2222-2222-2222-222222222222" });
+    expect(result.success).toBe(true);
+  });
+
+  it("Gate R4: accepts an explicit null resume_id to clear it", () => {
+    const result = ApplicationUpdateRequestSchema.safeParse({ resume_id: null });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.resume_id).toBeNull();
+    }
+  });
+
+  it("Gate R4: rejects a non-UUID resume_id", () => {
+    const result = ApplicationUpdateRequestSchema.safeParse({ resume_id: "not-a-uuid" });
+    expect(result.success).toBe(false);
   });
 });
 

@@ -269,6 +269,21 @@ document proposes.
 
 ## 6. How this integrates with `application` (Gate R4 preview)
 
+**RESOLVED at Gate R4 (0027_application_resume.sql), with one refinement
+beyond what this section originally proposed:** `resume_id` is set
+**explicitly by the candidate** (POST /applications body, correctable via
+PUT) — NOT automatically derived from whichever `opportunity_match` row
+had `promoted_opportunity_id` pointing at the claimed opportunity, which
+is what this section's original wording ("recording which resume was
+used") could be read as implying. The reason: nothing in the schema stops
+a candidate from marking more than one resume's match (for the same
+opportunity_source) as promoted toward the same claimed `opportunity` row
+— `promoted_opportunity_id` isn't unique-constrained across
+`opportunity_match` rows — so "the" resume to infer would be genuinely
+ambiguous in that case. Explicit and candidate-stated avoids that
+ambiguity entirely, at the cost of the frontend (Gate R7) needing to pass
+`resume_id` along at apply-time rather than it being inferred for free.
+
 Your refinement is already how `application` is built — nothing to
 change:
 
