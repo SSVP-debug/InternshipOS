@@ -18,6 +18,7 @@ const NAV_ITEMS: NavItem[] = [
   { path: "/feed", label: "Feed", icon: "✦" },
   { path: "/opportunities", label: "Opportunities", icon: "◈" },
   { path: "/applications", label: "Applications", icon: "▤" },
+  { path: "/resumes", label: "Resumes", icon: "▧" },
   { path: "/truth-center", label: "Truth Center", icon: "✓" },
   { path: "/profile", label: "Profile", icon: "◎" },
   { path: "/settings", label: "Settings", icon: "⚙" },

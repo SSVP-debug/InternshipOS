@@ -345,6 +345,36 @@ export const BulkApplyRequestSchema = z.object({
 });
 export type BulkApplyRequest = z.infer<typeof BulkApplyRequestSchema>;
 
+// ── Resume (Gate R1/R7) ──────────────────────────────────────────────────
+// Mirrors 0025_resume.sql. target_role_category is free text, not an
+// enum — see that migration's own comment on why (no existing
+// authoritative role-category list anywhere in this schema to constrain
+// it to). is_active is PUT-only (see ResumeUpdateRequestSchema below) —
+// a resume is always created active; archiving is something a candidate
+// does to an existing resume, never a creation-time choice.
+export const ResumeCreateRequestSchema = z.object({
+  label: z.string().trim().min(1),
+  target_role_category: z.string().trim().min(1).optional(),
+  evidence_source_id: z.string().uuid().optional(),
+});
+export type ResumeCreateRequest = z.infer<typeof ResumeCreateRequestSchema>;
+
+export const ResumeUpdateRequestSchema = z.object({
+  label: z.string().trim().min(1).optional(),
+  // Explicit null clears a previously-set category — same "nullable and
+  // optional both accepted" pattern as application.resume_id's own PUT
+  // schema (Gate R4).
+  target_role_category: z.string().trim().min(1).nullable().optional(),
+  evidence_source_id: z.string().uuid().nullable().optional(),
+  is_active: z.boolean().optional(),
+});
+export type ResumeUpdateRequest = z.infer<typeof ResumeUpdateRequestSchema>;
+
+export const ResumeSkillRequestSchema = z.object({
+  skill_id: z.string().uuid(),
+});
+export type ResumeSkillRequest = z.infer<typeof ResumeSkillRequestSchema>;
+
 // ── Application (Phase 1) ────────────────────────────────────────────────
 // Mirrors 0018_application.sql. `status` is intentionally NOT part of the
 // create/update body — status changes go through the dedicated

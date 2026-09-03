@@ -33,7 +33,15 @@
 //          joined to active opportunity_source rows
 //     PATCH /opportunity-matches/:id/inbox — save/dismiss/priority on a
 //          match, mirrors PATCH /opportunities/:id/inbox
-// Nothing else from Day 7+ / Phase 2+ (matching, AI generation, resumes,
+//     POST /opportunity-matches/bulk-apply — Gate R5, turns 1–20 selected
+//          matches into applications in one call (see opportunity-feed.ts)
+//   Gate R1/R7 (resumes — a candidate's role-specific skill groupings,
+//          see docs/gate-r0-resume-design.md):
+//     GET/GET-one/POST/PUT /resumes — Resume entity. No DELETE route —
+//          archiving (PUT is_active:false) is the only removal mechanism.
+//     POST /resumes/:id/skills, DELETE /resumes/:id/skills/:skillId —
+//          attach/detach an existing skill to/from a resume.
+// Nothing else from Day 7+ / Phase 2+ (matching, AI generation,
 // recruiter-facing features, etc.) is wired in here.
 
 import express, { type Express } from "express";
@@ -66,6 +74,7 @@ import { opportunityRouter } from "./routes/opportunity.js";
 import { opportunityFeedRouter } from "./routes/opportunity-feed.js";
 import { applicationRouter } from "./routes/application.js";
 import { applicationNoteRouter } from "./routes/application-note.js";
+import { resumeRouter } from "./routes/resume.js";
 
 // Builds the Express app for a given Env, without starting a listener —
 // so tests (see tests/app.test.ts) can construct as many independent app
@@ -146,6 +155,7 @@ export function createApp(env: Env): Express {
   app.use(requireAuth(env), opportunityFeedRouter());
   app.use(requireAuth(env), applicationRouter());
   app.use(requireAuth(env), applicationNoteRouter());
+  app.use(requireAuth(env), resumeRouter());
 
   // Must be last: notFoundHandler catches anything no router matched;
   // errorHandler is Express's four-arg error middleware, only reachable

@@ -19,6 +19,7 @@ import { renderApplicationDetail } from "./pages/applicationDetail";
 import { renderTruthCenter } from "./pages/truthCenter";
 import { renderProfile } from "./pages/profile";
 import { renderSettings } from "./pages/settings";
+import { renderResumes } from "./pages/resumes";
 
 function requireAuth(render: (root: HTMLElement, ...args: string[]) => void | Promise<void>) {
   return async (params: Record<string, string>, root: HTMLElement) => {
@@ -50,6 +51,7 @@ route("/applications", requireAuth(renderApplications));
 route("/applications/:id", requireAuth((root, id) => renderApplicationDetail(root, id)));
 route("/truth-center", requireAuth(renderTruthCenter));
 route("/profile", requireAuth(renderProfile));
+route("/resumes", requireAuth(renderResumes));
 route("/settings", requireAuth(renderSettings));
 route("/", (_params, root) => {
   navigate(getSession() ? "/today" : "/login");

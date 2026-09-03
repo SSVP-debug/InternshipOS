@@ -354,9 +354,25 @@ export interface OpportunitySummary {
   application_url?: string;
   deadline_date?: string;
 }
+// Gate R4/R7: the resume detail attached to GET /applications/:id's
+// single-application view — includes evidence_source_id (the actual
+// file), unlike the lighter ResumeSummary shape GET /applications (list)
+// enriches with. See api/src/routes/application.ts's own comment on why
+// the list endpoint deliberately doesn't carry the file id around.
+export interface ApplicationResumeSummary {
+  id: string;
+  label: string;
+  target_role_category: string | null;
+}
+export interface ApplicationResumeDetail extends ApplicationResumeSummary {
+  evidence_source_id: string | null;
+}
 export interface Application {
   id: string;
   opportunity_id: string;
+  // Gate R4: which resume (if any) was used — set explicitly at creation
+  // or correction, never inferred (see 0027_application_resume.sql).
+  resume_id: string | null;
   status: ApplicationStatus;
   applied_at?: string;
   deadline_override?: string;
@@ -367,6 +383,12 @@ export interface Application {
   created_at: string;
   updated_at: string;
   opportunity?: OpportunitySummary | null;
+  // GET /applications (list) populates ApplicationResumeSummary; GET
+  // /applications/:id (single) populates the richer
+  // ApplicationResumeDetail. Both come back under the same `resume` key,
+  // so callers narrow with `"evidence_source_id" in application.resume`
+  // when they specifically need the file id (see applicationDetail.ts).
+  resume?: ApplicationResumeSummary | ApplicationResumeDetail | null;
 }
 export interface ApplicationStatusEvent {
   id: string;
@@ -392,14 +414,17 @@ export const getApplication = (id: string) =>
   );
 export const createApplication = (data: {
   opportunity_id: string;
+  resume_id?: string;
   deadline_override?: string;
   next_action_date?: string;
   next_action_note?: string;
   recruiter_name?: string;
   recruiter_email?: string;
 }) => post<{ application: Application }>("/applications", data).then((b) => b.application);
-export const updateApplication = (id: string, data: Partial<Application>) =>
-  put<{ application: Application }>(`/applications/${id}`, data).then((b) => b.application);
+export const updateApplication = (
+  id: string,
+  data: Partial<Application> & { resume_id?: string | null },
+) => put<{ application: Application }>(`/applications/${id}`, data).then((b) => b.application);
 export const setApplicationStatus = (id: string, status: ApplicationStatus, note?: string) =>
   patch<{ application: Application }>(`/applications/${id}/status`, { status, note }).then((b) => b.application);
 
@@ -469,6 +494,44 @@ export interface TodayView {
 }
 export const getToday = () => get<TodayView>("/today");
 
+// ── Resume (Gate R1/R7) ───────────────────────────────────────────────────
+// See api/src/routes/resume.ts. Deliberately NOT built on the generic
+// makeCrud<T> helper above — resume has no DELETE route at all (archiving
+// via PUT is_active:false is the only removal mechanism, see that
+// route's own header comment), so forcing it through CrudApi<T>'s fixed
+// list/create/update/remove shape would mean either exposing a `remove`
+// that doesn't exist on the backend or silently mapping it to an archive
+// PUT — both worse than just not pretending this fits the generic shape.
+export interface ResumeSkillSummary {
+  id: string;
+  name: string;
+  category: string;
+}
+export interface Resume {
+  id: string;
+  label: string;
+  target_role_category: string | null;
+  evidence_source_id: string | null;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+  skills: ResumeSkillSummary[];
+}
+export const listResumes = () => get<{ resumes: Resume[] }>("/resumes").then((b) => b.resumes);
+export const getResume = (id: string) => get<{ resume: Resume }>(`/resumes/${id}`).then((b) => b.resume);
+export const createResume = (data: { label: string; target_role_category?: string; evidence_source_id?: string }) =>
+  post<{ resume: Resume }>("/resumes", data).then((b) => b.resume);
+// Also how archiving/unarchiving works — set is_active. There is
+// deliberately no separate archiveResume()/unarchiveResume() function;
+// see resume.ts's own module header for why one PUT endpoint covers both.
+export const updateResume = (
+  id: string,
+  data: { label?: string; target_role_category?: string | null; evidence_source_id?: string | null; is_active?: boolean },
+) => put<{ resume: Resume }>(`/resumes/${id}`, data).then((b) => b.resume);
+export const addResumeSkill = (resumeId: string, skillId: string) =>
+  post<{ skill: ResumeSkillSummary }>(`/resumes/${resumeId}/skills`, { skill_id: skillId }).then((b) => b.skill);
+export const removeResumeSkill = (resumeId: string, skillId: string) => del<void>(`/resumes/${resumeId}/skills/${skillId}`);
+
 // ── Opportunity Feed (Phase 2B) ──────────────────────────────────────────
 // Read/aggregation layer over opportunity_source + opportunity_match — a
 // DIFFERENT concept from the Opportunity (Phase 1) inbox above: these
@@ -503,11 +566,31 @@ export interface OpportunityFeedItem {
   // conservative this detection is.
   duplicate_source_count: number;
 }
+// Gate R3: a lightweight per-active-resume summary, always present
+// (empty array for a candidate with no active resumes) — see
+// opportunity-feed.ts's own comment on why this is counts-only, not full
+// items-per-resume (that's what passing resumeId to getOpportunityFeed
+// below is for).
+export interface ResumeFeedGroup {
+  resume_id: string;
+  label: string;
+  target_role_category: string | null;
+  total_matches: number;
+  eligible_matches: number;
+}
 export interface OpportunityFeedView {
   generated_at: string;
   items: OpportunityFeedItem[];
+  resume_groups: ResumeFeedGroup[];
 }
-export const getOpportunityFeed = () => get<OpportunityFeedView>("/opportunity-feed");
+// Gate R3: omitting resumeId returns the unchanged candidate-level feed
+// (resume_id IS NULL matches) — passing one switches `items` to that
+// resume's scoped matches instead. See opportunity-feed.ts's own header
+// comment for the full default-vs-scoped contract.
+export const getOpportunityFeed = (resumeId?: string) => {
+  const suffix = resumeId ? `?resume_id=${encodeURIComponent(resumeId)}` : "";
+  return get<OpportunityFeedView>(`/opportunity-feed${suffix}`);
+};
 
 // PATCH /opportunity-matches/:id/inbox returns the raw opportunity_match
 // row (same columns the GET route selects), NOT a full OpportunityFeedItem
@@ -540,3 +623,30 @@ export const updateOpportunityMatchInbox = (
   patch<{ opportunity_match: OpportunityMatchRecord }>(`/opportunity-matches/${matchId}/inbox`, data).then(
     (b) => b.opportunity_match,
   );
+
+// Gate R5/R6: turns 1–20 selected opportunity_match rows into
+// applications in one call — the copy-opportunity + promote-match +
+// create-application dance that pages/opportunityFeed.ts's Apply button
+// used to do as three separate requests (see that file's own history)
+// now happens server-side, atomically per item, with dedup (exact +
+// fuzzy cross-source) built in. resume_id is carried automatically from
+// each match's own resume_id — never passed here. See
+// opportunity-feed.ts's own header comment for the full per-item
+// contract (applied / already_applied / failed, partial success is
+// still a 200).
+export interface BulkApplyResult {
+  opportunity_match_id: string;
+  status: "applied" | "already_applied" | "failed";
+  application_id?: string;
+  opportunity_id?: string;
+  error?: string;
+}
+export interface BulkApplySummary {
+  applied: number;
+  already_applied: number;
+  failed: number;
+}
+export const bulkApply = (opportunityMatchIds: string[]) =>
+  post<{ results: BulkApplyResult[]; summary: BulkApplySummary }>("/opportunity-matches/bulk-apply", {
+    opportunity_match_ids: opportunityMatchIds,
+  });

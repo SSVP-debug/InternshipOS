@@ -478,6 +478,25 @@ textarea {
   color: var(--ink-faint);
 }
 
+/* Gate R7: the small × button inside a skill pill on the resume
+   management page (pages/resumes.ts) — kept minimal on purpose, it's
+   meant to read as part of the pill, not as a separate styled button. */
+.btn--inline-remove {
+  background: none;
+  border: none;
+  padding: 0 0 0 2px;
+  margin: 0;
+  font: inherit;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  color: inherit;
+  opacity: 0.65;
+}
+.btn--inline-remove:hover {
+  opacity: 1;
+}
+
 .pill--draft,
 .pill--tier_3_self_attested {
   background: #efece6;
