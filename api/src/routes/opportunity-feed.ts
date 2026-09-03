@@ -90,6 +90,7 @@ import type { AuthedRequest } from "../middleware/auth.js";
 import { OpportunityInboxUpdateSchema, BulkApplyRequestSchema, UuidParamSchema } from "../lib/schemas.js";
 import {
   buildOpportunityFeed,
+  buildDedupKey,
   type OpportunityMatchRow,
   type OpportunitySourceRow,
 } from "../lib/opportunityFeed.js";
@@ -155,6 +156,16 @@ const OPPORTUNITY_SOURCE_COLUMNS_FOR_APPLY =
 
 const UNIQUE_VIOLATION = "23505";
 
+// Gate R6: MVP cap on how many of the candidate's own existing
+// opportunity rows are considered for the fuzzy cross-source duplicate
+// check inside applyOneMatch — same "no true SQL aggregate available
+// through the RLS-scoped PostgREST client" reasoning as
+// RESUME_GROUP_COUNT_ROW_CAP (Gate R3). For any candidate with more than
+// this many opportunities, a genuine cross-source duplicate beyond the
+// cap would go undetected rather than the request erroring — an
+// acceptable MVP trade-off, not a silent correctness claim.
+const DEDUP_CANDIDATE_OPPORTUNITY_ROW_CAP = 500;
+
 interface BulkApplyResult {
   opportunity_match_id: string;
   status: "applied" | "already_applied" | "failed";
@@ -165,13 +176,19 @@ interface BulkApplyResult {
 
 /**
  * One selected match, start to finish: find-or-create the candidate's own
- * `opportunity` row for its underlying opportunity_source (dedup — see
- * 0028_opportunity_source_provenance.sql), record promoted_opportunity_id
- * on the match, create the application (carrying the match's own
- * resume_id automatically), and seed its initial status event — mirroring
- * POST /applications's own seeding step exactly, so an application
- * created via bulk-apply has identical history-completeness to one
- * created the old three-step manual way.
+ * `opportunity` row for its underlying opportunity_source — checking
+ * BOTH an exact opportunity_source_id match (Gate R5,
+ * 0028_opportunity_source_provenance.sql's DB-enforced dedup) AND a
+ * fuzzy title/company/location match against every other opportunity_source
+ * this candidate has already applied to (Gate R6, reusing
+ * opportunityFeed.ts's own buildDedupKey — the exact function the feed
+ * uses to hide obvious cross-source duplicates from display, now also
+ * closing the gap that display-only collapsing left at apply time) —
+ * record promoted_opportunity_id on the match, create the application
+ * (carrying the match's own resume_id automatically), and seed its
+ * initial status event — mirroring POST /applications's own seeding
+ * step exactly, so an application created via bulk-apply has identical
+ * history-completeness to one created the old three-step manual way.
  *
  * Deliberately NOT one big transaction across every selected match (or
  * even across one match's several writes) — this project has no
@@ -217,10 +234,11 @@ async function applyOneMatch(
     return { opportunity_match_id: opportunityMatchId, status: "already_applied", opportunity_id: matchRow.promoted_opportunity_id };
   }
 
-  // Dedup check (see migration header) — reuse an existing opportunity
-  // for this opportunity_source rather than creating a second one. The
-  // partial unique index is the actual guarantee; this SELECT is just
-  // avoiding a guaranteed-to-fail INSERT in the common repeat case.
+  // Exact-match dedup check (Gate R5, see migration header) — reuse an
+  // existing opportunity for this exact opportunity_source rather than
+  // creating a second one. The partial unique index is the actual
+  // guarantee; this SELECT is just avoiding a guaranteed-to-fail INSERT
+  // in the common repeat case.
   const { data: existingOpportunity, error: existingLookupError } = await supabase
     .from("opportunity")
     .select("id")
@@ -232,12 +250,29 @@ async function applyOneMatch(
     return { opportunity_match_id: opportunityMatchId, status: "failed", error: existingLookupError.message };
   }
 
-  let opportunityId: string;
+  let opportunityId: string | null = existingOpportunity ? (existingOpportunity as unknown as { id: string }).id : null;
 
-  if (existingOpportunity) {
-    opportunityId = (existingOpportunity as unknown as { id: string }).id;
-  } else {
-    const { data: sourceRow, error: sourceError } = await supabase
+  // Need the opportunity_source row either way from here: to compute the
+  // Gate R6 fuzzy key (if opportunityId isn't already settled by the
+  // exact match above) and to populate a freshly-created opportunity if
+  // neither dedup check finds an existing one.
+  let sourceRow: {
+    id: string;
+    source_type: string;
+    title: string;
+    company: string;
+    description: string | null;
+    location: string | null;
+    work_mode: string | null;
+    employment_type: string;
+    skills: string[];
+    application_url: string | null;
+    deadline_date: string | null;
+    posted_date: string | null;
+  } | null = null;
+
+  if (opportunityId === null) {
+    const { data: fetchedSourceRow, error: sourceError } = await supabase
       .from("opportunity_source")
       .select(OPPORTUNITY_SOURCE_COLUMNS_FOR_APPLY)
       .eq("id", matchRow.opportunity_source_id)
@@ -246,28 +281,56 @@ async function applyOneMatch(
     if (sourceError) {
       return { opportunity_match_id: opportunityMatchId, status: "failed", error: sourceError.message };
     }
-    if (!sourceRow) {
+    if (!fetchedSourceRow) {
       // The posting was removed from the catalog between matching and
       // apply — nothing to copy. Honest failure, not a fabricated
       // opportunity built from whatever fields happen to be on the match
       // row itself.
       return { opportunity_match_id: opportunityMatchId, status: "failed", error: "opportunity_source_not_found" };
     }
-    const source = sourceRow as unknown as {
+    sourceRow = fetchedSourceRow as unknown as typeof sourceRow;
+  }
+
+  // Gate R6 fuzzy dedup — only runs when the exact-match check above
+  // didn't already settle it. Reuses buildDedupKey (opportunityFeed.ts)
+  // — the SAME normalization the feed itself uses to hide obvious
+  // cross-source duplicates from display — against every OTHER
+  // opportunity_source-backed opportunity this candidate already has, so
+  // a posting that arrived via a second job board doesn't slip past the
+  // exact-opportunity_source_id check above and become a second,
+  // genuinely duplicate application.
+  if (opportunityId === null && sourceRow !== null) {
+    const { data: candidateOpportunities, error: candidateOppsError } = await supabase
+      .from("opportunity")
+      .select("id, title, company, location, opportunity_source_id")
+      .eq("candidate_id", candidateId)
+      .not("opportunity_source_id", "is", null)
+      .limit(DEDUP_CANDIDATE_OPPORTUNITY_ROW_CAP);
+
+    if (candidateOppsError) {
+      return { opportunity_match_id: opportunityMatchId, status: "failed", error: candidateOppsError.message };
+    }
+
+    const newSourceKey = buildDedupKey(sourceRow);
+    const fuzzyMatch = ((candidateOpportunities ?? []) as unknown as Array<{
       id: string;
-      source_type: string;
       title: string;
       company: string;
-      description: string | null;
       location: string | null;
-      work_mode: string | null;
-      employment_type: string;
-      skills: string[];
-      application_url: string | null;
-      deadline_date: string | null;
-      posted_date: string | null;
-    };
+      opportunity_source_id: string;
+    }>).find((existing) => existing.opportunity_source_id !== matchRow.opportunity_source_id && buildDedupKey(existing) === newSourceKey);
 
+    if (fuzzyMatch) {
+      opportunityId = fuzzyMatch.id;
+    }
+  }
+
+  if (opportunityId === null) {
+    // Neither dedup check found an existing opportunity — create one,
+    // copying the posting's details from opportunity_source. sourceRow is
+    // guaranteed non-null here (the only path that reaches this branch
+    // already fetched it above).
+    const source = sourceRow!;
     const { data: createdOpportunity, error: createError } = await supabase
       .from("opportunity")
       .insert({
@@ -294,7 +357,9 @@ async function applyOneMatch(
       // exact (candidate, opportunity_source) opportunity between our
       // SELECT above and this INSERT, the partial unique index catches
       // it here — re-read and reuse rather than surfacing a raw
-      // constraint violation to the caller.
+      // constraint violation to the caller. (This only catches the
+      // exact-match race, not a concurrent fuzzy-match race — an
+      // acceptable, narrow gap for an MVP-level concurrency guard.)
       if (createError.code === UNIQUE_VIOLATION) {
         const { data: raceWinner, error: raceLookupError } = await supabase
           .from("opportunity")
@@ -314,6 +379,11 @@ async function applyOneMatch(
     }
   }
 
+  // Every branch above either returned early or settled opportunityId —
+  // narrow the type once here rather than asserting at every use site
+  // below.
+  const resolvedOpportunityId: string = opportunityId;
+
   // Record the promotion on the match — same field, same meaning, as the
   // pre-Gate-R5 manual PATCH .../inbox flow (see schemas.ts's
   // promoted_opportunity_id comment). Not fatal if this write fails: the
@@ -322,24 +392,24 @@ async function applyOneMatch(
   // reported as part of the result either way, not silently swallowed.
   const { error: promoteError } = await supabase
     .from("opportunity_match")
-    .update({ promoted_opportunity_id: opportunityId })
+    .update({ promoted_opportunity_id: resolvedOpportunityId })
     .eq("id", opportunityMatchId)
     .eq("candidate_id", candidateId);
 
   const { data: createdApplication, error: applicationError } = await supabase
     .from("application")
-    .insert({ candidate_id: candidateId, opportunity_id: opportunityId, resume_id: matchRow.resume_id })
+    .insert({ candidate_id: candidateId, opportunity_id: resolvedOpportunityId, resume_id: matchRow.resume_id })
     .select("id, status")
     .single();
 
   if (applicationError) {
     if (applicationError.code === UNIQUE_VIOLATION) {
-      return { opportunity_match_id: opportunityMatchId, status: "already_applied", opportunity_id: opportunityId };
+      return { opportunity_match_id: opportunityMatchId, status: "already_applied", opportunity_id: resolvedOpportunityId };
     }
     return {
       opportunity_match_id: opportunityMatchId,
       status: "failed",
-      opportunity_id: opportunityId,
+      opportunity_id: resolvedOpportunityId,
       error: promoteError ? `${applicationError.message} (also failed to record promotion: ${promoteError.message})` : applicationError.message,
     };
   }
@@ -360,7 +430,7 @@ async function applyOneMatch(
     opportunity_match_id: opportunityMatchId,
     status: "applied",
     application_id: application.id,
-    opportunity_id: opportunityId,
+    opportunity_id: resolvedOpportunityId,
   };
 }
 

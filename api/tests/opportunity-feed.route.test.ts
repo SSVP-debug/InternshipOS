@@ -719,6 +719,11 @@ function makeBulkApplyMock(opts: {
   createApplicationError?: { message: string; code?: string } | null;
   applicationInserts?: Array<Record<string, unknown>>; // spy target
   opportunityInserts?: Array<Record<string, unknown>>; // spy target
+  // Gate R6 — the candidate's other opportunity_source-backed
+  // opportunities, considered for the fuzzy dedup check. Defaults to []
+  // (no fuzzy match found), same "unchanged behavior unless configured"
+  // convention as this file's other mock option defaults.
+  fuzzyCandidateOpportunities?: Array<{ id: string; title: string; company: string; location: string | null; opportunity_source_id: string }>;
 } = {}) {
   const {
     candidate = { id: CANDIDATE_ID },
@@ -729,6 +734,7 @@ function makeBulkApplyMock(opts: {
     createApplicationError = null,
     applicationInserts = [],
     opportunityInserts = [],
+    fuzzyCandidateOpportunities = [],
   } = opts;
 
   let opportunityInsertCount = 0;
@@ -758,9 +764,19 @@ function makeBulkApplyMock(opts: {
       if (table === "opportunity") {
         return {
           select: () => ({
+            // Gate R5 exact-match dedup lookup:
+            // .eq("candidate_id",...).eq("opportunity_source_id",...).maybeSingle()
+            // Gate R6 fuzzy-dedup lookup:
+            // .eq("candidate_id",...).not("opportunity_source_id","is",null).limit(...)
+            // Distinguished by which chain method is called next — both
+            // start with the same .eq("candidate_id", ...), so the
+            // dispatch has to happen one level down.
             eq: (_c1: string, _candId: string) => ({
               eq: (_c2: string, sourceId: string) => ({
                 maybeSingle: async () => ({ data: existingOpportunities[sourceId] ?? null, error: null }),
+              }),
+              not: () => ({
+                limit: async () => ({ data: fuzzyCandidateOpportunities, error: null }),
               }),
             }),
           }),
@@ -983,5 +999,94 @@ describe("POST /opportunity-matches/bulk-apply (Gate R5)", () => {
     await runRoute(getHandlers("post", "/opportunity-matches/bulk-apply"), req, res);
 
     expect(opportunityInserts[0].source).toBe("other");
+  });
+
+  // ── Gate R6: fuzzy cross-source duplicate protection ────────────────
+
+  it("Gate R6: reuses an existing opportunity when title+company+location normalize identically, even from a DIFFERENT opportunity_source_id", async () => {
+    const opportunityInserts: Array<Record<string, unknown>> = [];
+    const supabase = makeBulkApplyMock({
+      matches: { [MATCH_A_ID]: { id: MATCH_A_ID, opportunity_source_id: SOURCE_A_ID, resume_id: null, promoted_opportunity_id: null } },
+      sources: { [SOURCE_A_ID]: { id: SOURCE_A_ID, ...SOURCE_ROW_TEMPLATE, title: "Backend Intern", company: "Acme Corp.", location: "Remote" } },
+      // A different opportunity_source (a different job board's listing
+      // of the SAME posting) that the candidate already applied to.
+      fuzzyCandidateOpportunities: [
+        { id: "already-applied-via-other-board", title: "Backend Intern", company: "Acme Corp", location: "Remote", opportunity_source_id: "other-board-source-id" },
+      ],
+      opportunityInserts,
+    });
+    const req = { supabase, body: { opportunity_match_ids: [MATCH_A_ID] } } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("post", "/opportunity-matches/bulk-apply"), req, res);
+
+    const body = res.body as { results: Array<{ opportunity_id?: string }> };
+    expect(body.results[0].opportunity_id).toBe("already-applied-via-other-board");
+    expect(opportunityInserts).toHaveLength(0); // never created a fuzzy-duplicate opportunity
+  });
+
+  it("Gate R6: does NOT match on title+company alone when location differs — the same conservative rule the feed's own collapsing uses", async () => {
+    const opportunityInserts: Array<Record<string, unknown>> = [];
+    const supabase = makeBulkApplyMock({
+      matches: { [MATCH_A_ID]: { id: MATCH_A_ID, opportunity_source_id: SOURCE_A_ID, resume_id: null, promoted_opportunity_id: null } },
+      sources: { [SOURCE_A_ID]: { id: SOURCE_A_ID, ...SOURCE_ROW_TEMPLATE, title: "Backend Intern", company: "Acme Corp", location: "Bengaluru" } },
+      fuzzyCandidateOpportunities: [
+        { id: "different-city-opportunity", title: "Backend Intern", company: "Acme Corp", location: "Hyderabad", opportunity_source_id: "other-source-id" },
+      ],
+      opportunityInserts,
+    });
+    const req = { supabase, body: { opportunity_match_ids: [MATCH_A_ID] } } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("post", "/opportunity-matches/bulk-apply"), req, res);
+
+    const body = res.body as { results: Array<{ status: string }> };
+    expect(body.results[0].status).toBe("applied"); // treated as distinct, not merged
+    expect(opportunityInserts).toHaveLength(1); // a NEW opportunity was created
+  });
+
+  it("Gate R6: does not fuzzy-match against the same opportunity_source_id it's already handling (exact-match check already covers that path)", async () => {
+    // A candidate opportunity that IS the exact same opportunity_source_id
+    // as the match being applied — this should never be treated as a
+    // "fuzzy" match; it would already have been caught by the Gate R5
+    // exact-match check (existingOpportunities), which this test
+    // deliberately leaves empty to isolate the fuzzy path.
+    const opportunityInserts: Array<Record<string, unknown>> = [];
+    const supabase = makeBulkApplyMock({
+      matches: { [MATCH_A_ID]: { id: MATCH_A_ID, opportunity_source_id: SOURCE_A_ID, resume_id: null, promoted_opportunity_id: null } },
+      sources: { [SOURCE_A_ID]: { id: SOURCE_A_ID, ...SOURCE_ROW_TEMPLATE, title: "Backend Intern", company: "Acme Corp", location: "Remote" } },
+      fuzzyCandidateOpportunities: [
+        // Same opportunity_source_id as the match itself — must be
+        // excluded from the fuzzy candidate pool (self-match guard).
+        { id: "should-not-be-selected", title: "Backend Intern", company: "Acme Corp", location: "Remote", opportunity_source_id: SOURCE_A_ID },
+      ],
+      opportunityInserts,
+    });
+    const req = { supabase, body: { opportunity_match_ids: [MATCH_A_ID] } } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("post", "/opportunity-matches/bulk-apply"), req, res);
+
+    // A new opportunity IS created here (the exact-match dedup found
+    // nothing since existingOpportunities is empty, and the fuzzy match
+    // correctly ignored the self-referential row) — this asserts the
+    // self-match guard specifically, not the exact-match path.
+    expect(opportunityInserts).toHaveLength(1);
+  });
+
+  it("Gate R6: skips the fuzzy check entirely when the exact opportunity_source_id match already settled it (no wasted query)", async () => {
+    const fuzzyCandidateOpportunities: Array<{ id: string; title: string; company: string; location: string | null; opportunity_source_id: string }> = [];
+    const supabase = makeBulkApplyMock({
+      matches: { [MATCH_A_ID]: { id: MATCH_A_ID, opportunity_source_id: SOURCE_A_ID, resume_id: null, promoted_opportunity_id: null } },
+      existingOpportunities: { [SOURCE_A_ID]: { id: "exact-match-opportunity" } },
+      fuzzyCandidateOpportunities,
+    });
+    const req = { supabase, body: { opportunity_match_ids: [MATCH_A_ID] } } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("post", "/opportunity-matches/bulk-apply"), req, res);
+
+    const body = res.body as { results: Array<{ opportunity_id?: string }> };
+    expect(body.results[0].opportunity_id).toBe("exact-match-opportunity");
   });
 });

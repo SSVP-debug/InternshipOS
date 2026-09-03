@@ -86,6 +86,15 @@ export interface OpportunityFeedItem {
  * entity resolution (fuzzy text matching, location canonicalization) —
  * that remains a separate, bigger piece of work, deliberately out of
  * scope here.
+ *
+ * Gate R6: this collapsing only affects what's DISPLAYED — it never
+ * touched the database, so it alone couldn't stop a candidate from
+ * actually applying twice to the same real-world posting via two
+ * different opportunity_source rows (see Gate R5's bulk-apply). The same
+ * buildDedupKey() function this uses is now also called from
+ * applyOneMatch() (opportunity-feed.ts, the route) to close that gap at
+ * apply time — one algorithm, two call sites, not two separately-tuned
+ * notions of "duplicate."
  */
 const COMPANY_SUFFIX_RE = /\b(inc|llc|ltd|limited|corp|corporation|co|pvt|private)\b\.?/g;
 
@@ -99,8 +108,31 @@ export function normalizeForDedup(value: string | null): string {
     .trim();
 }
 
+// Gate R6: generalized from this module's original `duplicateKey` (which
+// only accepted an OpportunityFeedItem) to any {title, company, location}
+// shape, and exported — POST /opportunity-matches/bulk-apply
+// (opportunity-feed.ts, the route) reuses this SAME key function to
+// detect that a candidate already has an application for what this
+// module's own feed-display collapsing already recognizes as the same
+// real-world posting, even when it arrived via a different
+// opportunity_source_id (a different job board's listing of it). Reusing
+// this exact function — not a second, separately-tuned "is this a
+// duplicate" implementation — is the whole point: whatever the feed
+// already hides as an obvious duplicate must not be able to slip through
+// as two separate applications, and vice versa (nothing the feed treats
+// as distinct should be silently merged at apply time either).
+export interface DedupKeyInput {
+  title: string;
+  company: string;
+  location: string | null;
+}
+
+export function buildDedupKey(input: DedupKeyInput): string {
+  return `${normalizeForDedup(input.title)}|${normalizeForDedup(input.company)}|${normalizeForDedup(input.location)}`;
+}
+
 function duplicateKey(item: OpportunityFeedItem): string {
-  return `${normalizeForDedup(item.title)}|${normalizeForDedup(item.company)}|${normalizeForDedup(item.location)}`;
+  return buildDedupKey(item);
 }
 
 /**
