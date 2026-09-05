@@ -329,10 +329,14 @@ declare v_uid uuid; v_cand uuid; v_opp uuid; v_resume uuid; v_app_id uuid; v_res
 begin
   select val into v_uid from app_test_ids where key = 'user_a';
   select val into v_cand from app_test_ids where key = 'cand_a';
-  select val into v_opp from app_test_ids where key = 'opp_a';
 
   perform set_config('request.jwt.claims', json_build_object('sub', v_uid)::text, true);
   set local role authenticated;
+  -- Fresh opportunity, not opp_a/opp_c — both already have an application
+  -- from earlier tests in this file, and uq_application_candidate_opportunity
+  -- rejects a second one for the same (candidate, opportunity) pair.
+  insert into public.opportunity (candidate_id, title, company)
+  values (v_cand, 'Resume Deletion Test Intern', 'Delta Inc') returning id into v_opp;
   insert into public.resume (candidate_id, label) values (v_cand, 'Disposable Resume') returning id into v_resume;
   insert into public.application (candidate_id, opportunity_id, resume_id)
   values (v_cand, v_opp, v_resume)

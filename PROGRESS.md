@@ -1,6 +1,72 @@
 # InternshipOS — Progress
 
-## Overall completion: ~61% of full roadmap
+## 2026-09-05 — Independent audit + RLS suite fixes
+
+This entry is newer than everything below it, which was the last
+handover on record before this session. Verified by actually running
+the code, not by reading it:
+
+- **Backend**: 617/617 vitest tests pass, `tsc --noEmit` clean across all
+  three configs (src/scripts/tests).
+- **Frontend**: 32/32 vitest tests pass, `tsc && vite build` succeeds.
+- **RLS suite**: installed Postgres 16 and ran `tests/run_rls_tests.sh`
+  end to end. It had never actually gone green — three real bugs were
+  found and fixed:
+  1. `test_opportunity_ownership.sql` Test 11 counted rows across two
+     candidates while still RLS-scoped to one of them (fixed: `reset
+     role` now happens before the count, not after).
+  2. `test_opportunity_ownership.sql` Test 12 counted ALL of candidate
+     A's NULL-source-id rows instead of just the two it created,
+     silently inheriting state from earlier tests in the same file
+     (fixed: scoped the count to this test's own two titles).
+  3. `test_application_ownership.sql` Test 12 reused an opportunity that
+     already had an application on it from an earlier test, hitting
+     `uq_application_candidate_opportunity` (fixed: gave it its own
+     fresh opportunity).
+  Also wired `test_evidence_storage_ownership.sql` into the runner
+  script — it existed on disk but was never called, in CI or locally —
+  and added the missing local-harness table grants (`storage.objects`,
+  `storage.buckets`, `public.resume`, `public.resume_skill`) that a real
+  Supabase project sets automatically but this from-scratch shim never
+  had. **Full suite now exits 0, all 20 RLS test files, on a clean local
+  Postgres 16 run.**
+- **Decisions log**: all six pending entries (D-001–D-006) checked off
+  at owner instruction — see `docs/decisions-log.md`'s own 2026-09-05
+  note for the resolution reasoning and an explicit override path. No
+  code changed as a result of this; every checkbox kept the
+  already-implemented behavior. D-004 (no `ACCEPTED` application status)
+  is flagged there as the one most worth a second look on its own
+  merits.
+- **Multi-resume gate status, confirmed against actual code** (no
+  design docs exist in `docs/` for R3/R4/R6 beyond R0, so this was
+  verified by reading the shipped implementation directly, not by
+  finding a matching design doc):
+  - **R3 (grouped feed)** — shipped. `GET /opportunity-feed` returns an
+    always-present `resume_groups` field; `?resume_id=` switches the
+    `items` view; frontend has a resume-tab switcher
+    (`web/src/pages/opportunityFeed.ts`).
+  - **R4 (resume identity through apply)** — shipped. `application.resume_id`
+    exists with an ownership trigger (`trg_application_resume_candidate`)
+    and RLS-tested `ON DELETE SET NULL` history preservation.
+  - **R5 (bulk apply + dedup)** — shipped. `POST
+    /opportunity-matches/bulk-apply`, exact-match dedup via
+    `opportunity.opportunity_source_id` + a partial unique index
+    (`0028_opportunity_source_provenance.sql`).
+  - **R6 (structural duplicate prevention)** — partially shipped by
+    design, not by omission: exact-match (same `opportunity_source_id`)
+    dedup is live; fuzzy/cross-source matching (same real posting from
+    two different source_types) is explicitly still open, per that
+    migration's own header comment.
+  - **R7 (resume CRUD + frontend)** — shipped. `api/src/routes/resume.ts`
+    + `web/src/pages/resumes.ts`, archive-only (no hard delete, matching
+    the D-006 pattern elsewhere).
+  **Net: this repo is materially further along than the last recorded
+  checkpoint below (which stopped mid-Gate-1a) — whoever picked this up
+  after that handover carried it through R1–R7.** The one genuinely open
+  item is R6's fuzzy cross-source dedup, which was deliberately deferred,
+  not forgotten.
+
+---
 
 ## Gate 0 — Close out Phase 0 loose ends: DONE
 subject_entity_id write-time validation + orphan-check script, delivered

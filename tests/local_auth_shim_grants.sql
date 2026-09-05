@@ -72,6 +72,24 @@ grant select on public.opportunity_source to authenticated;
 -- per-row restriction.
 grant select, insert, update, delete on public.opportunity_match to authenticated;
 
+-- Gate 1a: evidence-documents Storage bucket grants (0021_evidence_storage_bucket.sql).
+--
+-- On a real Supabase project, storage.buckets/storage.objects already carry
+-- these grants for anon/authenticated/service_role out of the box — this
+-- local shim has to add them explicitly, same reasoning as
+-- local_storage_shim.sql's own schema-usage grants. Missing this meant every
+-- RLS test doing an authenticated-role write to storage.objects failed with
+-- "permission denied for table objects" before RLS was ever consulted.
+grant select, insert, update, delete on storage.objects to authenticated;
+grant select on storage.buckets to authenticated;
+grant all on storage.objects, storage.buckets to service_role;
+
+-- Gate R1: resume, resume_skill grants (0025_resume.sql). Same full CRUD
+-- grant pattern as every other candidate-owned multi-row table — RLS's
+-- ownership-through-candidate/resume policies do the actual per-row
+-- restriction.
+grant select, insert, update, delete on public.resume, public.resume_skill to authenticated;
+
 -- anon gets nothing in Phase 0/1/2 — no unauthenticated read/write surface yet.
 
 -- service_role bypasses RLS via the bypassrls role attribute (set in
@@ -80,5 +98,5 @@ grant select, insert, update, delete on public.opportunity_match to authenticate
 -- endpoint's post-provisioning step, and the ingestion/matching scripts'
 -- writes to opportunity_source/opportunity_match), never exposed to a
 -- client.
-grant all on public.candidate, public.personal_info, public.consent_record, public.education, public.work_authorization, public.skill, public.project, public.experience, public.achievement, public.certification, public.evidence_source, public.claim, public.opportunity, public.application, public.application_status_event, public.application_note, public.opportunity_source, public.opportunity_match
+grant all on public.candidate, public.personal_info, public.consent_record, public.education, public.work_authorization, public.skill, public.project, public.experience, public.achievement, public.certification, public.evidence_source, public.claim, public.opportunity, public.application, public.application_status_event, public.application_note, public.opportunity_source, public.opportunity_match, public.resume, public.resume_skill
   to service_role;

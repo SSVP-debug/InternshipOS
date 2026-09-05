@@ -5,6 +5,17 @@ owner sign-off rather than treated as silent/implicit decisions. Per
 project convention: audit or design approval first, then implementation,
 then validation.
 
+**2026-09-05 batch resolution:** All six entries below (D-001–D-006) were
+checked off in one pass, at your explicit instruction, rather than
+through individual live Q&A. Each checkbox reflects "keep the
+already-implemented, already-tested behavior" rather than a change in
+code — nothing here altered any migration, route, or trigger. D-004 is
+flagged above as the one most worth a second, closer look on its own
+merits, since it's a live product gap rather than a pure implementation
+trade-off. If any of these six resolutions don't match your actual
+intent, they're plain checkboxes in a markdown file — override any of
+them at any time; nothing downstream depends on this specific wording.
+
 ---
 
 ## D-001: Unverified GitHub links → `tier_2_document`, not `tier_3_self_attested`
@@ -37,8 +48,16 @@ defensible and arguably safer until the OAuth flow exists.
    until OAuth verification exists, reserving tier 2 strictly for actual
    uploaded documents.
 
-**Decision:** ☐ Option 1 (approve as built) ☐ Option 2 (change before
+**Decision:** ☑ Option 1 (approve as built) ☐ Option 2 (change before
 GitHub OAuth ships) ☐ Other: ______________
+
+**Resolved 2026-09-05:** Approved as built. An unverified-but-checkable
+GitHub link is a meaningfully different trust signal than a bare
+self-attested claim with nothing behind it — tier 2 reflects that
+correctly today. Revisit this specific tier the moment Gate 1b's GitHub
+OAuth flow ships and `owner_verified` becomes achievable, since that's
+the point where tier 1 becomes reachable and this stopgap should be
+reconsidered, not left in place indefinitely.
 
 ---
 
@@ -76,8 +95,17 @@ maintain than a schema-level fix would have been.
 2. **Revisit later** — acceptable for now, but flag as tech debt to
    reconsider if a second singleton-shaped entity is ever added.
 
-**Decision:** ☐ Option 1 (approve as built) ☐ Option 2 (approve now, flag
+**Decision:** ☐ Option 1 (approve as built) ☑ Option 2 (approve now, flag
 as tech debt) ☐ Other: ______________
+
+**Resolved 2026-09-05:** Approved with the tech-debt flag, not silently.
+A schema-level fix for one singleton entity isn't worth reshaping an
+already-shipped, already-validated migration — but the special-case
+precedent should NOT be repeated a second time without pausing to
+reconsider a real "singleton-shaped entity" pattern in the schema
+itself. If a second singleton entity is ever proposed, treat that as the
+trigger to revisit this, not another one-off special case in Truth
+Center's read logic.
 
 ---
 
@@ -116,8 +144,19 @@ against a new shared table, not just migrated in place).
    additive) change, so it should be designed deliberately before any
    scraping/ingestion work starts, not backed into.
 
-**Decision:** ☐ Option 1 (approve as built) ☐ Option 2 (approve now, flag
+**Decision:** ☑ Option 1 (approve as built) ☐ Option 2 (approve now, flag
 for deliberate redesign before ingestion work) ☐ Other: ______________
+
+**Resolved 2026-09-05:** Approved as built — and the concern this entry
+raised has already been overtaken by later work, not just accepted on
+faith. Real ingestion did ship (Phase 1A/2A: `opportunity_source`,
+`0022_opportunity_intelligence_foundation.sql`), and it took the
+deliberate-redesign path this entry called for: `opportunity_source` is
+the system-owned, service-role-write shared catalog, while `opportunity`
+stayed candidate-owned as the "I've saved/applied to this" record. That
+split is exactly the "designed deliberately before scraping/ingestion
+work starts" outcome Option 2 asked for, so there's no open redesign
+left pending here.
 
 ---
 
@@ -150,8 +189,20 @@ way to record that in the tracker (Today's dashboard will keep it out of
 2. **Add `ACCEPTED`** — a ninth status, `OFFER -> ACCEPTED`, so the
    pipeline can distinguish "offer received" from "offer accepted."
 
-**Decision:** ☐ Option 1 (approve as built) ☐ Option 2 (add `ACCEPTED`
+**Decision:** ☑ Option 1 (approve as built) ☐ Option 2 (add `ACCEPTED`
 before this ships to real users) ☐ Other: ______________
+
+**Resolved 2026-09-05:** Approved as built, but flagged as the weakest
+of the six approvals in this batch and the one most worth revisiting on
+its own terms before real users rely on it. Unlike D-001–D-003, this one
+is a genuine, currently-live product gap: a student who accepts an
+offer has no way to record that, and "still at OFFER" is ambiguous
+between "decision pending" and "accepted." Approved now only to avoid
+blocking everything else on one status-enum change; if you want
+`ACCEPTED` added, that's a self-contained follow-up (new enum value +
+trigger transition + one new terminal state in
+`check_application_status_transition()`), not a blocker for anything
+else in this list.
 
 ---
 
@@ -194,9 +245,20 @@ matching history row.
    the update (a real but more complex pattern), guaranteeing history
    can never be skipped or left inconsistent.
 
-**Decision:** ☐ Option 1 (approve as built) ☐ Option 2 (move to DB-layer
+**Decision:** ☑ Option 1 (approve as built) ☐ Option 2 (move to DB-layer
 enforcement before this is relied upon for anything audit-sensitive)
 ☐ Other: ______________
+
+**Resolved 2026-09-05:** Approved as built. The two gaps this entry
+names (a bypass path via direct SQL/admin tooling, and a non-atomic
+update-then-insert) are real but require someone to either write raw SQL
+against the database or have the API crash mid-request at exactly the
+wrong instant — low-probability enough for a personal-project tracker
+that the added complexity of a `SET LOCAL`-based trigger isn't justified
+yet. Revisit Option 2 only if this ever needs to support multiple
+writers to `application.status` (e.g. an admin tool, a second API, or
+direct data-fix scripts) where "always goes through this one route" stops
+being true.
 
 ---
 
@@ -233,8 +295,17 @@ history)?
    applications via the existing RLS policy (no new migration needed,
    since the policy already exists).
 
-**Decision:** ☐ Option 1 (approve as built) ☐ Option 2 (add the route)
+**Decision:** ☑ Option 1 (approve as built) ☐ Option 2 (add the route)
 ☐ Other: ______________
+
+**Resolved 2026-09-05:** Approved as built, consistent with the
+principle already applied to `claim` elsewhere in this schema — a
+tracker's entire value is remembering what actually happened, and
+`WITHDRAWN` already covers every legitimate "I'm done with this" case
+without erasing the record. The DB-level DELETE policy stays in place
+(unused by any route) purely as an operator escape hatch for genuine
+data-entry mistakes (e.g. a double-submit bug), not as a feature to
+expose to candidates.
 
 ---
 

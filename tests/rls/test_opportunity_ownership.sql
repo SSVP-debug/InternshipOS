@@ -274,8 +274,12 @@ begin
   insert into public.opportunity (candidate_id, title, company, opportunity_source_id)
   values (v_cand_b, 'Platform Engineering Intern', 'Acme Corp', v_source)
   returning id into v_id;
-  select count(*) into v_count from public.opportunity where opportunity_source_id = v_source;
   reset role;
+
+  -- Counted AFTER reset role: as candidate B (RLS-scoped), this query would
+  -- only ever see candidate B's own row and the count would always read 1,
+  -- masking whether candidate A's row still exists. Must run unscoped.
+  select count(*) into v_count from public.opportunity where opportunity_source_id = v_source;
 
   if v_count != 2 then
     raise exception 'FAIL: expected 2 opportunities (one per candidate) sharing the same opportunity_source_id, got %', v_count;
@@ -294,7 +298,13 @@ begin
   set local role authenticated;
   insert into public.opportunity (candidate_id, title, company) values (v_cand, 'Manual Entry One', 'Beta Inc');
   insert into public.opportunity (candidate_id, title, company) values (v_cand, 'Manual Entry Two', 'Beta Inc');
-  select count(*) into v_count from public.opportunity where candidate_id = v_cand and opportunity_source_id is null;
+  -- Scoped to this test's own two titles, not "every NULL-source row this
+  -- candidate has" — candidate A already picked up NULL-source rows from
+  -- Test 1 and Test 5 earlier in this same file, so an unscoped count would
+  -- silently inherit that unrelated state.
+  select count(*) into v_count from public.opportunity
+    where candidate_id = v_cand and opportunity_source_id is null
+      and title in ('Manual Entry One', 'Manual Entry Two');
   reset role;
 
   if v_count != 2 then
