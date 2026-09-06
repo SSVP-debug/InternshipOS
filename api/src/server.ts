@@ -88,6 +88,16 @@ export function createApp(env: Env): Express {
   const logger = createLogger(env);
   const app = express();
 
+  // Render (and Cloudflare in front of it) terminates TLS and proxies to
+  // this process, setting X-Forwarded-For to the real client IP. Without
+  // this, Express ignores that header entirely, so express-rate-limit
+  // falls back to seeing every request as coming from the same proxy IP
+  // (or throws ERR_ERL_UNEXPECTED_X_FORWARDED_FOR, as it did here).
+  // Trusting exactly 1 hop (not `true`/all hops) matches Render's actual
+  // single-proxy topology and avoids a client being able to spoof its own
+  // X-Forwarded-For to evade rate limiting.
+  app.set("trust proxy", 1);
+
   // Security headers (nosniff, hidden X-Powered-By, etc.) — first, so
   // every response gets them regardless of what happens downstream.
   app.use(helmet());
