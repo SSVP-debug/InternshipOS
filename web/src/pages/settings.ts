@@ -7,8 +7,11 @@ import {
   deleteAccount,
   getProfile,
   updateProfileStatus,
+  evidenceSourceApi,
+  ApiError,
   type ConsentRecord,
   type ConsentType,
+  type EvidenceSource,
 } from "../lib/api";
 import { navigate } from "../lib/router";
 import { signOut } from "../lib/auth";
@@ -25,16 +28,34 @@ const CONSENT_LABELS: Record<ConsentType, string> = {
 // there isn't one, and no OAuth route/callback exists anywhere in this
 // repo (0004_consent_record.sql's own comment reserves it for "a future
 // GitHub import"). Every OTHER consent type here gates something real the
-// moment you grant it. Treating this one identically — a clickable
-// "Grant" that flips to a "Granted" pill — told candidates GitHub access
-// was live when clicking it does nothing but write a consent_record row.
-// This note (and the disabled state below) is the fix: still collectible
-// as a future pre-authorization, but never presented as an active
-// connection.
-const CONSENT_NOT_YET_AVAILABLE: Partial<Record<ConsentType, string>> = {
+// moment you grant it.
+//
+// Stopgap ahead of building real OAuth (app registration, callback route,
+// linked-identity storage, actual sync logic — all separate, larger
+// work): let the candidate paste their GitHub URL by hand now. This is
+// stored as an ordinary evidence_source row with source_type
+// "github_repository" — the exact type 0015_evidence_source.sql already
+// defines for this, with owner_verified defaulting to false because
+// nothing here verifies ownership (that's still only settable by the
+// real OAuth flow, per that migration's own comment). No new column, no
+// new migration — this is the "additive to extend later" case that
+// design already anticipated.
+//
+// A fixed title ("GitHub profile") is the convention used to find "the"
+// placeholder row again on reload, distinguishing it from any per-project
+// repository links a candidate adds separately via Profile > Evidence
+// Sources (which use their own free-form titles). Saving a URL here also
+// grants github_oauth_access — the URL itself, not a separate click, is
+// the actual expression of intent — but the note below always stays
+// visible so "Granted" is never confused with a live connection.
+const GITHUB_PLACEHOLDER_TITLE = "GitHub profile";
+const CONSENT_NOTE: Partial<Record<ConsentType, string>> = {
   github_oauth_access:
-    "GitHub sync isn't built yet — this only pre-authorizes it for later. Granting it does not connect a GitHub account or read any repos.",
+    "GitHub sync isn't built yet. Pasting your URL below only saves it for later — it does not connect your account, verify ownership, or read any repos.",
 };
+function isLikelyGithubUrl(url: string): boolean {
+  return /^https?:\/\/(www\.)?github\.com\/[A-Za-z0-9-]+\/?$/i.test(url.trim());
+}
 
 export async function renderSettings(root: HTMLElement) {
   const main = renderShell(root, "/settings");
@@ -47,33 +68,101 @@ export async function renderSettings(root: HTMLElement) {
   const consentCard = h("div", { class: "card" }, [h("div", { class: "empty" }, ["Loading…"])]);
   main.append(consentCard);
 
+  // Builds the small inline "paste your GitHub URL" form used in place of
+  // a plain Grant button for github_oauth_access. Kept as its own
+  // function since it needs its own error box, input, and submit
+  // handling distinct from every other (single-button) consent row.
+  function renderGithubUrlForm(existing: EvidenceSource | undefined, onSaved: () => void): HTMLElement {
+    const urlField = h("input", {
+      type: "text",
+      placeholder: "https://github.com/your-username",
+      value: existing?.external_url ?? "",
+    }) as HTMLInputElement;
+    const errorBox = h("span", { class: "form-error", style: "display:none" }, []);
+    const saveBtn = h("button", { class: "btn btn--small", type: "submit" }, [existing ? "Update" : "Save"]);
+
+    const form = h(
+      "form",
+      {
+        class: "form-row",
+        style: "align-items:flex-start;gap:8px;margin-top:6px",
+        onSubmit: async (e: Event) => {
+          e.preventDefault();
+          const url = urlField.value.trim();
+          errorBox.style.display = "none";
+          if (!isLikelyGithubUrl(url)) {
+            errorBox.textContent = "Enter a GitHub profile URL, e.g. https://github.com/your-username";
+            errorBox.style.display = "inline";
+            return;
+          }
+          saveBtn.setAttribute("disabled", "");
+          try {
+            if (existing) {
+              await evidenceSourceApi.update(existing.id, { external_url: url });
+            } else {
+              await evidenceSourceApi.create({
+                source_type: "github_repository",
+                title: GITHUB_PLACEHOLDER_TITLE,
+                external_url: url,
+              });
+            }
+            // Best-effort: the URL is the meaningful action here, so its
+            // being saved is what "granting" this consent now represents.
+            // A failure here shouldn't undo the save above or block the
+            // candidate — worst case the pill under-reports for a moment
+            // and they can hit Grant separately.
+            await grantConsent("github_oauth_access").catch(() => {});
+            toast(existing ? "GitHub URL updated." : "GitHub URL saved.");
+            onSaved();
+          } catch (err) {
+            errorBox.textContent = err instanceof ApiError ? err.message : errorMessage(err);
+            errorBox.style.display = "inline";
+          } finally {
+            saveBtn.removeAttribute("disabled");
+          }
+        },
+      },
+      [h("div", { class: "field", style: "flex:1;margin:0" }, [urlField, errorBox]), saveBtn],
+    );
+
+    return form;
+  }
+
   async function loadConsents() {
     consentCard.innerHTML = "";
     let consents: ConsentRecord[];
+    let evidenceSources: EvidenceSource[];
     try {
-      consents = await listConsents();
+      [consents, evidenceSources] = await Promise.all([listConsents(), evidenceSourceApi.list()]);
     } catch (err) {
       consentCard.append(h("div", { class: "form-error" }, [errorMessage(err)]));
       return;
     }
 
     const byType = new Map(consents.map((c) => [c.consent_type, c]));
+    const githubPlaceholder = evidenceSources.find(
+      (e) => e.source_type === "github_repository" && e.title === GITHUB_PLACEHOLDER_TITLE,
+    );
+
     (Object.keys(CONSENT_LABELS) as ConsentType[]).forEach((type, i) => {
       const record = byType.get(type);
       const granted = record && !record.revoked_at;
-      const notYetAvailableNote = CONSENT_NOT_YET_AVAILABLE[type];
+      const note = CONSENT_NOTE[type];
+      const isGithub = type === "github_oauth_access";
 
       const metaText = granted ? `Granted ${new Date(record!.granted_at).toLocaleDateString()}` : "Not granted";
+      const githubMetaText = githubPlaceholder
+        ? `Saved ${new Date(githubPlaceholder.created_at).toLocaleDateString()}`
+        : "Not saved";
 
-      let action: HTMLElement;
-      if (granted) {
-        // Already granted (possibly from before this note existed) —
-        // still shown as Granted, since it's a true statement about the
-        // consent_record; the note above is what clarifies it doesn't
-        // do anything live yet.
+      let action: HTMLElement | null;
+      if (isGithub) {
+        // No standalone Grant button for this one — saving the URL
+        // below is what grants it (see renderGithubUrlForm). Show a
+        // status pill only once something's actually been saved.
+        action = githubPlaceholder ? h("span", { class: "pill pill--confirmed" }, ["Saved"]) : null;
+      } else if (granted) {
         action = h("span", { class: "pill pill--confirmed" }, ["Granted"]);
-      } else if (notYetAvailableNote) {
-        action = h("span", { class: "pill", title: notYetAvailableNote }, ["Coming soon"]);
       } else {
         action = h(
           "button",
@@ -97,8 +186,9 @@ export async function renderSettings(root: HTMLElement) {
         h("div", { class: "list-row", style: i === 0 ? "border-top:none" : undefined }, [
           h("div", { class: "list-row__main" }, [
             h("div", { class: "list-row__title" }, [CONSENT_LABELS[type]]),
-            h("div", { class: "list-row__meta" }, [metaText]),
-            notYetAvailableNote ? h("div", { class: "list-row__meta" }, [notYetAvailableNote]) : null,
+            h("div", { class: "list-row__meta" }, [isGithub ? githubMetaText : metaText]),
+            note ? h("div", { class: "list-row__meta" }, [note]) : null,
+            isGithub ? renderGithubUrlForm(githubPlaceholder, () => loadConsents()) : null,
           ]),
           action,
         ]),

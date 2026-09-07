@@ -1,34 +1,35 @@
-# Round: GitHub consent honesty fix (2026-09-07)
+# Round: GitHub URL placeholder (2026-09-07)
 
-## The bug
-Settings' Consent list treated all 4 consent types identically: click
-"Grant" -> pill flips to "GRANTED". For data_processing,
-llm_processing, and document_upload_storage that's accurate — granting
-those actually unlocks something real server-side. For
-github_oauth_access it's misleading: there is no GitHub OAuth route,
-callback, or any requireConsent("github_oauth_access") check anywhere in
-the backend. Clicking "Grant" only writes a consent_record row; nothing
-connects, nothing syncs. The UI made it look like a live integration.
+## What this adds
+Ahead of real GitHub OAuth (app registration, callback route, linked
+identity, sync logic — separate, larger work needing your GitHub App
+client id/secret), the Settings > GitHub access row now has an inline
+"paste your GitHub URL" input + Save button instead of just a static
+"Coming soon" pill.
 
-## Fix (frontend-only, 1 file)
-`web/src/pages/settings.ts`:
-- github_oauth_access now shows a non-clickable "Coming soon" pill
-  instead of an actionable "Grant" button, plus an explanatory line:
-  "GitHub sync isn't built yet — this only pre-authorizes it for later.
-  Granting it does not connect a GitHub account or read any repos."
-- If a candidate had already granted it before this fix, it still shows
-  "Granted" (that's a true statement about the consent_record) — the
-  clarifying note is what fixes the misleading part, not hiding the
-  state.
-- No backend/schema change: github_oauth_access stays a valid consent
-  type for whenever GitHub OAuth is actually built.
+## How it's stored — no schema change
+Saved as an ordinary `evidence_source` row, `source_type:
+"github_repository"`, `title: "GitHub profile"` (fixed, so it's found
+again on reload — distinct from any per-project repo links a candidate
+adds separately via Profile > Evidence Sources). `owner_verified` stays
+false, exactly as 0015_evidence_source.sql's own comment says it must
+until real OAuth exists. Zero backend/migration changes — POST/PUT
+/evidence-sources already supported this exactly.
+
+Saving the URL also grants `github_oauth_access` consent (best-effort,
+non-blocking) — the URL itself is treated as the actual expression of
+intent here, rather than requiring a separate Grant click first. The
+clarifying note ("GitHub sync isn't built yet...") stays visible
+regardless of granted/saved state, so a "Saved" pill is never confused
+with a live connection.
+
+## File changed
+- `web/src/pages/settings.ts` (only)
 
 ## Test status (run in this session)
 - Frontend: 32/32 passing, tsc --noEmit clean.
-- Backend: untouched, not re-run this round (no backend files changed).
+- Backend: untouched, not re-run (no backend files changed; the routes
+  this relies on were already covered by the 617/617 baseline).
 
 ## Still open
-Building the real GitHub OAuth flow (app registration, callback route,
-storing the linked GitHub identity, actual evidence-sync logic) is a
-separate, larger gate — it needs a GitHub OAuth App client id/secret from
-you before any of that can be built.
+The real OAuth flow itself — same as noted in the previous round.
