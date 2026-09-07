@@ -243,6 +243,77 @@ export interface EvidenceSource {
   created_at: string;
 }
 export const evidenceSourceApi = makeCrud<EvidenceSource>("evidence-sources", "evidence_sources", "evidence_source");
+export const getEvidenceDownloadUrl = (id: string) =>
+  get<{ download_url: string; expires_in: number }>(`/evidence-sources/${id}/download-url`).then(
+    (b) => b.download_url,
+  );
+
+// ── Document upload (Storage-backed) ─────────────────────────────────────
+// Signed-upload-URL pattern from 0021_evidence_storage_bucket.sql /
+// evidence-source.ts: (1) ask the API for a Storage upload slot, (2) PUT
+// the file bytes straight to that slot, (3) create the evidence_source row
+// pointing at the resulting path. Step (2) deliberately does NOT go
+// through request()/BASE_URL — it's a different origin (Supabase Storage,
+// not our own API) and the pre-signed URL's embedded token is itself the
+// auth, so no Authorization header is needed or sent. Using supabase-js's
+// own uploadToSignedUrl() here was considered and rejected: per auth.ts's
+// header comment, supabase-js is deliberately confined to session/auth in
+// this codebase so every actual read/write has exactly one path (the
+// Express API) — this stays a plain fetch PUT instead.
+export interface UploadUrlResult {
+  path: string;
+  signed_url: string;
+  token: string;
+}
+export const requestUploadUrl = (filename: string) =>
+  post<UploadUrlResult>("/evidence-sources/upload-url", { filename });
+
+export async function uploadFileToSignedUrl(uploadUrl: UploadUrlResult, file: File): Promise<void> {
+  const res = await fetch(uploadUrl.signed_url, {
+    method: "PUT",
+    headers: { "Content-Type": file.type || "application/octet-stream" },
+    body: file,
+  });
+  if (!res.ok) {
+    throw new ApiError(res.status, "upload_failed", "Uploading the file failed. Please try again.");
+  }
+}
+
+// Mirrors 0021_evidence_storage_bucket.sql's bucket-level file_size_limit
+// (10 MB) and allowed_mime_types exactly — a client-side check purely for
+// a fast, specific error message; the bucket itself is still the
+// authoritative enforcement (this can never be relied on alone).
+export const RESUME_FILE_MAX_BYTES = 10 * 1024 * 1024;
+export const RESUME_FILE_ACCEPT = ".pdf,.doc,.docx,.png,.jpg,.jpeg";
+const RESUME_FILE_ALLOWED_MIME_TYPES = new Set([
+  "application/pdf",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "image/png",
+  "image/jpeg",
+]);
+export function validateResumeFile(file: File): string | null {
+  if (file.size > RESUME_FILE_MAX_BYTES) return "File is too large — the limit is 10 MB.";
+  if (!RESUME_FILE_ALLOWED_MIME_TYPES.has(file.type)) return "Please upload a PDF, Word doc, or image (PNG/JPEG).";
+  return null;
+}
+
+// Uploads a resume file and creates the evidence_source row for it in one
+// step, returning the full evidence_source row (so callers can attach its
+// id to a resume AND display its title without a second fetch). Throws
+// ApiError("consent_required") unchanged if document_upload_storage
+// consent hasn't been granted yet — callers handle that the same way
+// profile.ts handles data_processing consent (see that page's own
+// attemptSave for the pattern this mirrors).
+export async function uploadResumeFile(file: File): Promise<EvidenceSource> {
+  const uploadUrl = await requestUploadUrl(file.name);
+  await uploadFileToSignedUrl(uploadUrl, file);
+  return evidenceSourceApi.create({
+    source_type: "document_upload",
+    title: file.name,
+    file_ref: uploadUrl.path,
+  });
+}
 
 export type ClaimStatus = "DRAFT" | "CONFIRMED" | "DISPUTED" | "SUPERSEDED" | "REVOKED";
 export interface Claim {
