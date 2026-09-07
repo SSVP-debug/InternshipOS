@@ -1,35 +1,34 @@
-# Round: Resume file upload (2026-09-07)
+# Round: GitHub consent honesty fix (2026-09-07)
 
-## What changed
-Only 2 files, both frontend — no backend/schema changes were needed. The
-backend already had everything (evidence_source_id on resume, the
-evidence-documents Storage bucket, signed upload/download flow); the
-Resumes page just never used it.
+## The bug
+Settings' Consent list treated all 4 consent types identically: click
+"Grant" -> pill flips to "GRANTED". For data_processing,
+llm_processing, and document_upload_storage that's accurate — granting
+those actually unlocks something real server-side. For
+github_oauth_access it's misleading: there is no GitHub OAuth route,
+callback, or any requireConsent("github_oauth_access") check anywhere in
+the backend. Clicking "Grant" only writes a consent_record row; nothing
+connects, nothing syncs. The UI made it look like a live integration.
 
-- `web/src/lib/api.ts` — added upload helpers (requestUploadUrl,
-  uploadFileToSignedUrl, uploadResumeFile, validateResumeFile,
-  getEvidenceDownloadUrl).
-- `web/src/pages/resumes.ts` — Add/Edit resume forms now have a real file
-  input (PDF/Word/PNG/JPEG, 10MB cap), cards show the attached file with a
-  Download button, editing supports replace/remove with best-effort
-  cleanup of the old evidence_source row, and document_upload_storage
-  consent is handled inline (same "grant and retry" pattern as
-  profile.ts's data_processing consent).
-
-## How to merge
-Drop these two files into the matching paths in your repo, overwriting
-the existing ones:
-- web/src/lib/api.ts
-- web/src/pages/resumes.ts
+## Fix (frontend-only, 1 file)
+`web/src/pages/settings.ts`:
+- github_oauth_access now shows a non-clickable "Coming soon" pill
+  instead of an actionable "Grant" button, plus an explanatory line:
+  "GitHub sync isn't built yet — this only pre-authorizes it for later.
+  Granting it does not connect a GitHub account or read any repos."
+- If a candidate had already granted it before this fix, it still shows
+  "Granted" (that's a true statement about the consent_record) — the
+  clarifying note is what fixes the misleading part, not hiding the
+  state.
+- No backend/schema change: github_oauth_access stays a valid consent
+  type for whenever GitHub OAuth is actually built.
 
 ## Test status (run in this session)
-- Backend: 617/617 passing (unchanged — no backend files touched)
-- Frontend: 32/32 passing
-- `tsc --noEmit` on web/: clean
+- Frontend: 32/32 passing, tsc --noEmit clean.
+- Backend: untouched, not re-run this round (no backend files changed).
 
-## Not verified
-The actual upload PUT to Supabase's signed URL was not smoke-tested
-against a live Supabase project in this session (no credentials
-available here). Worth a manual test after merging: add a resume, attach
-a PDF, confirm it downloads back correctly, then replace/remove it and
-confirm the old Storage object is gone.
+## Still open
+Building the real GitHub OAuth flow (app registration, callback route,
+storing the linked GitHub identity, actual evidence-sync logic) is a
+separate, larger gate — it needs a GitHub OAuth App client id/secret from
+you before any of that can be built.

@@ -20,6 +20,22 @@ const CONSENT_LABELS: Record<ConsentType, string> = {
   document_upload_storage: "Document upload storage",
 };
 
+// github_oauth_access is the one consent type with no backend behind it
+// yet — grep api/src/routes for requireConsent("github_oauth_access") and
+// there isn't one, and no OAuth route/callback exists anywhere in this
+// repo (0004_consent_record.sql's own comment reserves it for "a future
+// GitHub import"). Every OTHER consent type here gates something real the
+// moment you grant it. Treating this one identically — a clickable
+// "Grant" that flips to a "Granted" pill — told candidates GitHub access
+// was live when clicking it does nothing but write a consent_record row.
+// This note (and the disabled state below) is the fix: still collectible
+// as a future pre-authorization, but never presented as an active
+// connection.
+const CONSENT_NOT_YET_AVAILABLE: Partial<Record<ConsentType, string>> = {
+  github_oauth_access:
+    "GitHub sync isn't built yet — this only pre-authorizes it for later. Granting it does not connect a GitHub account or read any repos.",
+};
+
 export async function renderSettings(root: HTMLElement) {
   const main = renderShell(root, "/settings");
   main.append(h("div", { class: "page-loading" }, ["Loading settings…"]));
@@ -45,32 +61,46 @@ export async function renderSettings(root: HTMLElement) {
     (Object.keys(CONSENT_LABELS) as ConsentType[]).forEach((type, i) => {
       const record = byType.get(type);
       const granted = record && !record.revoked_at;
+      const notYetAvailableNote = CONSENT_NOT_YET_AVAILABLE[type];
+
+      const metaText = granted ? `Granted ${new Date(record!.granted_at).toLocaleDateString()}` : "Not granted";
+
+      let action: HTMLElement;
+      if (granted) {
+        // Already granted (possibly from before this note existed) —
+        // still shown as Granted, since it's a true statement about the
+        // consent_record; the note above is what clarifies it doesn't
+        // do anything live yet.
+        action = h("span", { class: "pill pill--confirmed" }, ["Granted"]);
+      } else if (notYetAvailableNote) {
+        action = h("span", { class: "pill", title: notYetAvailableNote }, ["Coming soon"]);
+      } else {
+        action = h(
+          "button",
+          {
+            class: "btn btn--small",
+            onClick: async () => {
+              try {
+                await grantConsent(type);
+                toast("Consent granted.");
+                await loadConsents();
+              } catch (err) {
+                toast(errorMessage(err), "error");
+              }
+            },
+          },
+          ["Grant"],
+        );
+      }
+
       consentCard.append(
         h("div", { class: "list-row", style: i === 0 ? "border-top:none" : undefined }, [
           h("div", { class: "list-row__main" }, [
             h("div", { class: "list-row__title" }, [CONSENT_LABELS[type]]),
-            h("div", { class: "list-row__meta" }, [
-              granted ? `Granted ${new Date(record!.granted_at).toLocaleDateString()}` : "Not granted",
-            ]),
+            h("div", { class: "list-row__meta" }, [metaText]),
+            notYetAvailableNote ? h("div", { class: "list-row__meta" }, [notYetAvailableNote]) : null,
           ]),
-          granted
-            ? h("span", { class: "pill pill--confirmed" }, ["Granted"])
-            : h(
-                "button",
-                {
-                  class: "btn btn--small",
-                  onClick: async () => {
-                    try {
-                      await grantConsent(type);
-                      toast("Consent granted.");
-                      await loadConsents();
-                    } catch (err) {
-                      toast(errorMessage(err), "error");
-                    }
-                  },
-                },
-                ["Grant"],
-              ),
+          action,
         ]),
       );
     });
