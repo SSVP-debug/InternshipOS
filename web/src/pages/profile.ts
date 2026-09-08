@@ -60,7 +60,7 @@ export async function renderProfile(root: HTMLElement) {
     h("div", { class: "page-header" }, [
       h("div", {}, [
         h("h1", {}, ["Profile"]),
-        h("p", { class: "subtle" }, ["Everything here backs the Truth Center — the more you fill in, the more InternshipOS can eventually help with applications."]),
+        h("p", { class: "subtle" }, ["The more you fill in here, with evidence behind it, the more InternshipOS can eventually help with your applications."]),
       ]),
     ]),
   );

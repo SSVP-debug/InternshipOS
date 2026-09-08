@@ -5,13 +5,18 @@
 //      switching tabs re-fetches getOpportunityFeed(resumeId), which
 //      swaps `items` to that resume's scoped matches (Gate R3's own
 //      contract — see api.ts's getOpportunityFeed comment).
-//   2. Apply now calls bulkApply() (Gate R5/R6) instead of the old
-//      three-request manual dance (createOpportunity + createApplication
-//      + updateOpportunityMatchInbox) this file used to do inline. Same
-//      endpoint, called with either one id (the per-card Apply button) or
-//      several (the "Apply to selected" bulk action) — resume_id is
-//      carried automatically server-side from each match's own
-//      resume_id, never something this page needs to pass.
+//   2. "Start application" now calls bulkApply() (Gate R5/R6) instead of
+//      the old three-request manual dance (createOpportunity +
+//      createApplication + updateOpportunityMatchInbox) this file used to
+//      do inline. Same endpoint, called with either one id (the per-card
+//      "Start application" button) or several (the "Start applications"
+//      bulk action) — resume_id is carried automatically server-side from
+//      each match's own resume_id, never something this page needs to
+//      pass. Gate A2.1: the button/toast copy was renamed from "Apply" /
+//      "Applied" to "Start application" / "Application started" — the
+//      underlying action has always been an internal tracking record
+//      (application.status starts at SAVED), never an external employer
+//      submission, and the old labels implied otherwise.
 
 import { h, formatDate, toast, errorMessage } from "../lib/dom";
 import { renderShell } from "../lib/shell";
@@ -31,10 +36,14 @@ function pill(text: string, cls: string): HTMLElement {
 function eligibilityPill(status: OpportunityFeedItem["eligibility_status"]): HTMLElement {
   if (status === "eligible") return pill("Eligible", "saved");
   if (status === "ineligible") return pill("Not eligible", "dismissed");
-  // Deliberately neutral, never framed as an error or as ineligible —
-  // "unknown" just means this opportunity hasn't stated structured
-  // eligibility requirements yet (see 0023_country_neutral_eligibility.sql).
-  return pill("Eligibility: Not determined", "new");
+  // Deliberately neutral, never framed as an error or as ineligible.
+  // "unknown" can mean either the opportunity hasn't stated a structured
+  // eligibility requirement (see 0023_country_neutral_eligibility.sql) or
+  // that InternshipOS doesn't have enough of the candidate's own profile
+  // to evaluate a requirement the opportunity did state — the pill stays
+  // a neutral summary either way; the per-item "Not enough information:
+  // …" line below (item.match_unknown) is what actually says which.
+  return pill("Eligibility: Not enough info", "new");
 }
 
 export async function renderOpportunityFeed(root: HTMLElement) {
@@ -146,8 +155,8 @@ export async function renderOpportunityFeed(root: HTMLElement) {
           }
         }
         selected.clear();
-        const parts = [`${summary.applied} applied`];
-        if (summary.already_applied > 0) parts.push(`${summary.already_applied} already applied`);
+        const parts = [`${summary.applied} started`];
+        if (summary.already_applied > 0) parts.push(`${summary.already_applied} already started`);
         if (summary.failed > 0) parts.push(`${summary.failed} failed`);
         toast(parts.join(", ") + ".", summary.failed > 0 ? "error" : "success");
         draw();
@@ -161,7 +170,7 @@ export async function renderOpportunityFeed(root: HTMLElement) {
         h("div", {}, [`${selected.size} selected`]),
         h("div", { class: "btn-row" }, [
           h("button", { class: "btn btn--small", onClick: () => { selected.clear(); draw(); } }, ["Clear"]),
-          h("button", { class: "btn btn--small btn--primary", onClick: applySelected }, ["Apply to selected"]),
+          h("button", { class: "btn btn--small btn--primary", onClick: applySelected }, ["Start applications"]),
         ]),
       ]),
     ]);
@@ -202,11 +211,11 @@ export async function renderOpportunityFeed(root: HTMLElement) {
         const { results } = await bulkApply([item.opportunity_match_id]);
         const result = results[0];
         if (result.status === "failed") {
-          toast(result.error ?? "Could not apply.", "error");
+          toast(result.error ?? "Could not start an application.", "error");
           return;
         }
         if (result.opportunity_id) item.promoted_opportunity_id = result.opportunity_id;
-        toast(result.status === "already_applied" ? "You already applied to this one." : "Application started.");
+        toast(result.status === "already_applied" ? "You already started an application for this one." : "Application started.");
         if (result.application_id) {
           navigate(`/applications/${result.application_id}`);
         } else {
@@ -288,7 +297,7 @@ export async function renderOpportunityFeed(root: HTMLElement) {
             item.inbox_status === "dismissed" ? "Restore" : "Dismiss",
           ]),
           h("button", { class: "btn btn--small btn--primary", onClick: apply, disabled: alreadyApplied }, [
-            alreadyApplied ? "Applied" : "Apply",
+            alreadyApplied ? "Application started" : "Start application",
           ]),
         ]),
       ]),
