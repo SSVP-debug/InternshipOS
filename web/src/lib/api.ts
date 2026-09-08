@@ -367,7 +367,26 @@ export interface TruthCenterView {
 export const getTruthCenter = () => get<TruthCenterView>("/truth-center");
 
 // ── Account (export / delete) ────────────────────────────────────────────
-export const exportAccount = () => get<Record<string, unknown>>("/export");
+// Deliberately bypasses request()/get() — /export now returns a binary
+// PDF (see api/src/routes/account.ts + pdfExport.ts), and request()
+// always does res.text() then JSON.parse(text), which would mangle
+// binary bytes as UTF-8 text and then fail to parse. Same reasoning as
+// uploadFileToSignedUrl bypassing request() for binary data, except this
+// one DOES need our own Authorization header (unlike a Supabase signed
+// URL, this hits our own API, which requireAuth on this route expects).
+export async function exportAccount(): Promise<Blob> {
+  const token = await getAccessToken();
+  if (!token) throw new ApiError(401, "not_authenticated", "You need to sign in first.");
+  const res = await fetch(`${BASE_URL}/export`, { headers: { Authorization: `Bearer ${token}` } });
+  if (!res.ok) {
+    // Error responses on this route are still plain JSON (see
+    // account.ts's 404/400 branches, unchanged) — only the success path
+    // became binary.
+    const body = await res.json().catch(() => ({}));
+    throw new ApiError(res.status, body.error ?? "export_failed", body.message ?? "Export failed.");
+  }
+  return res.blob();
+}
 export const deleteAccount = () => del<void>("/account");
 
 // ── Opportunity (Phase 1) ────────────────────────────────────────────────

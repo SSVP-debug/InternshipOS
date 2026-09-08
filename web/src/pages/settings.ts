@@ -259,7 +259,7 @@ export async function renderSettings(root: HTMLElement) {
       h("div", { class: "spread" }, [
         h("div", {}, [
           h("div", { style: "font-weight:600" }, ["Export everything"]),
-          h("div", { class: "subtle" }, ["Download every record InternshipOS has about you as JSON."]),
+          h("div", { class: "subtle" }, ["Download every record InternshipOS has about you as a PDF."]),
         ]),
         h(
           "button",
@@ -267,10 +267,9 @@ export async function renderSettings(root: HTMLElement) {
             class: "btn",
             onClick: async () => {
               try {
-                const data = await exportAccount();
-                const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+                const blob = await exportAccount();
                 const url = URL.createObjectURL(blob);
-                const a = h("a", { href: url, download: "internshipos-export.json" }, []);
+                const a = h("a", { href: url, download: "internshipos-export.pdf" }, []);
                 document.body.append(a);
                 a.click();
                 a.remove();

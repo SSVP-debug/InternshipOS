@@ -1,9 +1,15 @@
 // account.ts
-// GET    /export   — structured JSON dump of everything the caller owns,
-//                     across every Phase-0 table. docs/candidate-truth-layer
-//                     -phase0.md §6 (Export): "a structured (JSON) dump of
-//                     everything in §3's Phase-0 table set, scoped to that
-//                     candidate_id... should ship in Phase 0, not deferred."
+// GET    /export   — a readable PDF document of everything the caller
+//                     owns, across every Phase-0 (and Phase 1) table.
+//                     docs/candidate-truth-layer-phase0.md §6 (Export)
+//                     originally called for "a structured (JSON) dump of
+//                     everything in §3's Phase-0 table set" for data
+//                     portability; this now renders that same query
+//                     result as a PDF instead, per direct product
+//                     decision — the candidate wants a document to read,
+//                     not a machine-readable file. See pdfExport.ts for
+//                     the rendering; nothing about which tables are
+//                     queried, or their RLS scoping, changed.
 // DELETE /account  — real, destructive, cascading deletion. §6 (Deletion):
 //                     "Deletion is destructive, not a soft archived flag."
 //
@@ -15,6 +21,8 @@ import { Router } from "express";
 import type { AuthedRequest } from "../middleware/auth.js";
 import type { Env } from "../lib/env.js";
 import { adminClient } from "../lib/supabaseClient.js";
+import { buildExportPdf } from "../lib/pdfExport.js";
+import { reqLogger } from "../middleware/requestLogger.js";
 
 export function accountRouter(env: Env): Router {
   const router = Router();
@@ -96,25 +104,36 @@ export function accountRouter(env: Env): Router {
       return res.status(400).json({ error: "export_failed", message: firstError.error.message });
     }
 
-    return res.status(200).json({
+    // buildExportPdf ends the document synchronously (see pdfExport.ts),
+    // but it's still a stream — piping happens after headers are set,
+    // same order as any other Node response stream.
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", 'attachment; filename="internshipos-export.pdf"');
+    const pdf = buildExportPdf({
       exported_at: new Date().toISOString(),
       candidate,
       personal_info: personalInfo.data ?? null,
-      consent_records: consentRecords.data,
-      education: education.data,
+      consent_records: consentRecords.data ?? [],
+      education: education.data ?? [],
       work_authorization: workAuthorization.data ?? null,
-      skills: skills.data,
-      projects: projects.data,
-      experiences: experiences.data,
-      achievements: achievements.data,
-      certifications: certifications.data,
-      evidence_sources: evidenceSources.data,
-      claims: claims.data,
-      opportunities: opportunities.data,
-      applications: applications.data,
-      application_status_events: applicationStatusEvents.data,
-      application_notes: applicationNotes.data,
+      skills: skills.data ?? [],
+      projects: projects.data ?? [],
+      experiences: experiences.data ?? [],
+      achievements: achievements.data ?? [],
+      certifications: certifications.data ?? [],
+      evidence_sources: evidenceSources.data ?? [],
+      claims: claims.data ?? [],
+      opportunities: opportunities.data ?? [],
+      applications: applications.data ?? [],
+      application_status_events: applicationStatusEvents.data ?? [],
+      application_notes: applicationNotes.data ?? [],
     });
+    pdf.on("error", (err) => {
+      reqLogger(req).error({ err }, "export_pdf_stream_failed");
+      if (!res.headersSent) res.status(500).end();
+      else res.end();
+    });
+    pdf.pipe(res);
   });
 
   router.delete("/account", async (req: AuthedRequest, res) => {
