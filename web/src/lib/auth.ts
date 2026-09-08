@@ -47,3 +47,8 @@ export async function signIn(email: string, password: string): Promise<{ error: 
 export async function signOut(): Promise<void> {
   await supabase.auth.signOut();
 }
+
+// Gate A1: re-exported from authState.ts (a separate, dependency-free
+// module — see its own header for why) so main.ts's single existing
+// import line ("./lib/auth") doesn't need to change to pick this up.
+export { authStateTransitioned } from "./authState.js";

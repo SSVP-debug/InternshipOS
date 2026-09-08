@@ -1,7 +1,25 @@
 // router.ts — deliberately minimal: hash-based (no server-side routing
-// config needed for a static build), a route table of path patterns to
-// render functions, and a single #app mount point that gets cleared and
-// re-rendered on every navigation.
+// config needed for a static build) and a route table of path patterns
+// to render functions.
+//
+// Gate A1 (persistent navigation): this module used to unconditionally
+// clear the entire #app mount root before every dispatch — see the old
+// version's own header comment — which is what destroyed and rebuilt the
+// sidebar shell on every navigation (shell.ts's renderShell() just
+// appended a fresh shell into whatever root it was given; it never asked
+// for a clean root itself). That pre-clear has been removed. Root
+// teardown is now each route handler's own responsibility, which was
+// already true in practice for every handler in this codebase:
+//   - bare/guest pages (authPages.ts, onboarding.ts) already call
+//     clear(root) themselves at the top of their render function.
+//   - the notFound handler (main.ts) already does root.innerHTML = ""
+//     itself.
+//   - shelled pages go through shell.ts's renderShell(), which now owns
+//     the decision to reuse an already-mounted shell (persistent
+//     sidebar) vs. rebuild one from scratch (see that file's header).
+// So removing the router's own clear is behavior-neutral for every
+// existing handler except shell.ts, which was rewritten specifically to
+// take over that responsibility.
 
 type RouteHandler = (params: Record<string, string>, root: HTMLElement) => void | Promise<void>;
 
@@ -50,23 +68,15 @@ async function render() {
   const hash = window.location.hash.slice(1) || "/";
   const path = hash.split("?")[0];
 
-  root.innerHTML = "";
-  const loading = document.createElement("div");
-  loading.className = "page-loading";
-  loading.textContent = "Loading…";
-  root.append(loading);
-
   for (const r of routes) {
     const match = path.match(r.pattern);
     if (match) {
       const params: Record<string, string> = {};
       r.keys.forEach((key, i) => (params[key] = decodeURIComponent(match[i + 1])));
-      root.innerHTML = "";
       await r.handler(params, root);
       return;
     }
   }
-  root.innerHTML = "";
   await notFoundHandler({}, root);
 }
 

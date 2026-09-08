@@ -7,8 +7,9 @@
 // authenticated page the same one-line guard.
 
 import "./style.css";
+import { clear } from "./lib/dom";
 import { route, notFound, startRouter, navigate } from "./lib/router";
-import { initSession, getSession, onSessionChange } from "./lib/auth";
+import { initSession, getSession, onSessionChange, authStateTransitioned } from "./lib/auth";
 import { renderLogin, renderSignup } from "./pages/authPages";
 import { renderOnboarding } from "./pages/onboarding";
 import { renderToday } from "./pages/today";
@@ -54,8 +55,8 @@ route("/profile", requireAuth(renderProfile));
 route("/resumes", requireAuth(renderResumes));
 route("/settings", requireAuth(renderSettings));
 route("/", (_params, root) => {
+  clear(root);
   navigate(getSession() ? "/today" : "/login");
-  root.append(document.createTextNode(""));
 });
 
 notFound((_params, root) => {
@@ -71,9 +72,17 @@ async function bootstrap() {
   const appRoot = document.querySelector<HTMLDivElement>("#app")!;
   await initSession();
 
-  // Re-render the current route whenever auth state changes (sign in/out
-  // from any tab or page), so the router's own guards re-evaluate.
-  onSessionChange(() => {
+  // Re-render the current route when auth state actually transitions
+  // (sign in/out from any tab or page), so the router's own guards
+  // re-evaluate. Gate A1: this used to fire on every onSessionChange
+  // event unconditionally, including same-state events like Supabase's
+  // periodic token refresh — see authStateTransitioned's own comment.
+  let wasAuthenticated = !!getSession();
+  onSessionChange((session) => {
+    const isAuthenticated = !!session;
+    if (!authStateTransitioned(wasAuthenticated, isAuthenticated)) return;
+    wasAuthenticated = isAuthenticated;
+
     const hash = window.location.hash;
     window.location.hash = "";
     window.location.hash = hash || "#/";
