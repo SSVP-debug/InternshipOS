@@ -1,66 +1,104 @@
-# Round: PDF export (2026-09-07/08)
+# A3.2 — Opportunity Freshness & Expiry
+
+Drop-in delivery for the approved A3.2 implementation gate. Copy these files
+into your working tree at the matching paths, overwriting the existing ones.
+No database migration, no new files outside what's listed below.
 
 ## What changed
-"Download export" now downloads a readable PDF instead of a raw JSON
-file. Every table the export already covered (account, personal_info,
-consent_records, education, work_authorization, skills, projects,
-experiences, achievements, certifications, evidence_sources, claims,
-opportunities, applications, application_status_events,
-application_notes) is unchanged in what's queried or how it's scoped
-(RLS + explicit .eq(candidate_id) as before) — only the response format
-changed.
 
-## New dependency (approved)
-`pdfkit` (^0.20.2) added to `api/package.json` dependencies, plus
-`@types/pdfkit` (^0.17.6) as a devDependency for typings. Pure JS, no
-native binaries, no headless browser — picked specifically to stay
-free-tier/Render-friendly. `package-lock.json` is included so `npm ci`
-reproduces exactly.
+**New file**
+- `api/src/lib/ingestion/expireStaleOpportunities.ts` — the sole writer of
+  `opportunity_source.status = 'expired'`. Runs one deterministic SQL-level
+  sweep: `status = 'active' AND last_seen_at < now() - 14 days` →
+  `status = 'expired'`. Strict `<`, idempotent, never touches `removed`.
 
-## Files changed
-- `api/package.json`, `api/package-lock.json` — new dependency.
-- `api/src/lib/pdfExport.ts` (new) — generic renderer: humanizes
-  snake_case keys, formats booleans/null sensibly, renders each table as
-  a titled section of label/value rows, "None." for empty sections.
-- `api/src/routes/account.ts` — GET /export now streams
-  `buildExportPdf(...)` via `pdf.pipe(res)` with
-  `Content-Type: application/pdf` instead of `res.json(...)`. The 404
-  (no candidate) and 400 (sub-table query error) branches are unchanged.
-- `api/tests/account.test.ts` — the two success-path tests now assert
-  real PDF output (Content-Type/Content-Disposition headers + "%PDF-"
-  magic bytes) via a stream-capturing res mock, instead of JSON body
-  fields. This runs pdfkit for real, not mocked.
-- `web/src/lib/api.ts` — `exportAccount()` rewritten as a raw
-  authenticated fetch returning a `Blob`, bypassing the shared
-  `request()` helper (which always does `res.text()` → `JSON.parse`,
-  which would mangle binary PDF bytes).
-- `web/src/pages/settings.ts` — the download handler now saves the Blob
-  directly as `internshipos-export.pdf`; copy updated from "as JSON" to
-  "as a PDF".
+**Modified**
+- `api/src/lib/ingestion/types.ts` — added `SweepSummary` and an additive
+  `sweep: SweepSummary` field on `IngestionSummary`. Nothing existing removed
+  or renamed.
+- `api/src/lib/ingestion/runIngestion.ts` — calls the sweep once, after every
+  adapter has run, gated by the ingestion-outage guard: the sweep only runs
+  if **at least one source actually wrote something** (`inserted > 0` or
+  `updated > 0`) this run. This is deliberately **not** `fetched > 0` — a
+  source can successfully fetch data and still write nothing at all (every
+  listing filtered out downstream, or every upsert failing outright — bad
+  service-role key, table unreachable, etc.), in which case `last_seen_at`
+  never actually advances for a single row even though the fetch "succeeded."
+  Gating on `fetched > 0` would have let the sweep run believing the catalog
+  was refreshed when it wasn't. A partial run (one source down, one source
+  writing successfully) does **not** trip the guard — the sweep still runs,
+  same as normal daily operation; only a run where nothing was written
+  anywhere skips it.
+- `api/scripts/ingest.ts` — logs the sweep's outcome (`expired: N` or the
+  skip reason) alongside the existing per-source summary. No change to the
+  script's exit-code logic.
+- `api/tests/runIngestion.test.ts` — the shared mock Supabase client now also
+  supports `.update().eq().lt().select()` (needed for the sweep call) and an
+  optional `upsertError` (needed for the guard-fix regression tests below);
+  added 8 new tests covering the sweep running on success/partial-failure,
+  being skipped on total outage / no adapters / all-zero runs, sweep error
+  propagation, and — the specific gap fixed in this revision — being skipped
+  when a source fetches data but writes nothing (either every listing gets
+  filtered out, or every write fails outright).
 
-## Note on the original design doc
-docs/candidate-truth-layer-phase0.md §6 originally specified "a
-structured (JSON) dump" for data portability. This change is a direct,
-explicit departure from that — noted in account.ts's own header comment
-— trading portability for readability, per direct instruction. If
-machine-readable export is ever needed again (e.g. for an actual
-data-portability/GDPR-style requirement), it'd need to be re-added
-separately; this round does not keep a JSON fallback.
+## Outage-guard correction (this revision)
 
-## Test status (run in this session)
-- Backend: 617/617 passing (net-same count: 2 tests rewritten, not
-  added/removed). `npm run build` (full tsc, not just --noEmit): clean.
-- Frontend: 32/32 passing, tsc --noEmit clean.
-- Manually rendered a sample PDF locally and rasterized it to PNG to
-  eyeball the actual layout (not just structural validity) — clean
-  section headings, correct label formatting, correct pagination,
-  "None." for empty sections rather than looking broken.
+The first pass of this guard used `fetched > 0 || inserted > 0 || updated > 0`.
+That was too permissive: `fetched > 0` only means the adapter's network call
+succeeded — it says nothing about whether any row's `last_seen_at` actually
+advanced. A source can fetch real data and still write nothing (every
+listing filtered out by relevance/normalization checks downstream, or every
+upsert failing outright), and in both cases the guard would have let the
+sweep run believing the catalog had just been refreshed when nothing was
+actually refreshed. The guard now checks `inserted > 0 || updated > 0` only
+— the two new regression tests (`fetched > 0, nothing written` via an empty
+`listings` array, and `fetched > 0, every write fails` via a forced
+`upsertError`) both assert the sweep stays skipped in exactly that scenario.
 
-## Known pre-existing gaps noticed during this work (not fixed, out of scope)
-- account.ts's DELETE /account handler still has a "KNOWN GAP" comment
-  saying no file-upload flow exists yet to purge Storage objects on
-  account deletion — that's stale now that the resume-upload round added
-  real Storage uploads via evidence_source. Deleting an account today
-  will cascade-delete the evidence_source rows but will NOT purge the
-  underlying Storage objects, so orphaned files would accumulate in the
-  bucket. Worth its own round if you want it addressed.
+**New test file**
+- `api/tests/expireStaleOpportunities.test.ts` — 6 tests: threshold constant,
+  correct query shape (`status`/`last_seen_at`/cutoff value), correct count
+  reporting, zero-result case, non-throwing DB-error handling, and cutoff
+  computed relative to an injectable `now` (not wall-clock time).
+
+## What did NOT change
+
+- No database migration. `opportunity_source.status` and `.last_seen_at`
+  already existed with the right semantics (`0022_opportunity_intelligence_foundation.sql`);
+  `'expired'` was already a legal enum value, just never written before.
+- `matchEngine.ts` and `skillNormalization.ts` — untouched, not read by any
+  of the new/changed code.
+- `Feed` (`opportunity-feed.ts`, `opportunityFeed.ts`) and `Today`
+  (`today.ts`, `todayView.ts`) — untouched. They already filter
+  `status = 'active'` in three places; those filters simply become
+  meaningful now that `expired` rows can exist. Verified via the existing
+  `opportunityFeed.test.ts` case at line 107 (`status: "expired"` is dropped
+  from the feed), which already passed before this change and still does.
+- `removed` — never written. Reserved for a future explicit-signal phase per
+  the approved design; out of scope here.
+
+## Verification run in this delivery
+
+- `npx vitest run` — **670/670 passing** (up from the 617 baseline: +53 from
+  the new sweep test file and the new `runIngestion.test.ts` cases).
+- `npx tsc --noEmit` — clean.
+- `npm run typecheck:scripts` — clean.
+- `npm run typecheck:tests` — clean.
+- `git diff --name-only` confirms only the 4 modified files + 2 new files
+  listed above; nothing else touched, `supabase/migrations/` untouched.
+
+Postgres/RLS was not available in this sandbox (same caveat as prior
+gates) — this change doesn't touch RLS policies or table structure at all,
+so no RLS re-verification is needed, but running the existing `npm test`
+suite plus a manual `npm run ingest` against a staging Supabase project
+before merging to production is still recommended, per the project's
+testing standard.
+
+## One behavior worth knowing
+
+Because `writeOpportunitySource.ts` already force-sets `status: 'active'`
+and bumps `last_seen_at` on every successful upsert (including updates to
+existing rows), a listing that goes stale, gets marked `expired`, and then
+genuinely reappears in a later ingestion run will automatically flip back to
+`active` with no special-casing needed — this was already true before A3.2
+and required no change.

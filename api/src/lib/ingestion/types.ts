@@ -59,6 +59,20 @@ export interface WriteSummary {
   errors: string[];
 }
 
+/**
+ * A3.2 — outcome of the post-ingestion expiry sweep (see
+ * expireStaleOpportunities.ts). `ran: false` means the ingestion-outage
+ * guard in runIngestion.ts deliberately skipped the sweep this run —
+ * see `skippedReason` for why. This is distinct from the sweep running
+ * and simply finding nothing to expire (`ran: true, expired: 0`).
+ */
+export interface SweepSummary {
+  ran: boolean;
+  expired: number;
+  errors: string[];
+  skippedReason?: string;
+}
+
 /** Full pipeline summary returned by runIngestion() and printed by the CLI. */
 export interface IngestionSummary {
   startedAt: string;
@@ -72,4 +86,6 @@ export interface IngestionSummary {
     failed: number;
     errors: string[];
   }>;
+  /** A3.2 — see SweepSummary. */
+  sweep: SweepSummary;
 }

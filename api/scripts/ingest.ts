@@ -68,6 +68,17 @@ async function main() {
     }
   }
 
+  console.log(`\n[expiry sweep]`);
+  if (summary.sweep.ran) {
+    console.log(`  expired:            ${summary.sweep.expired}`);
+    if (summary.sweep.errors.length > 0) {
+      console.log(`  errors:`);
+      for (const err of summary.sweep.errors) console.log(`    - ${err}`);
+    }
+  } else {
+    console.log(`  skipped:            ${summary.sweep.skippedReason ?? "(no reason given)"}`);
+  }
+
   console.log(`\nStarted:  ${summary.startedAt}`);
   console.log(`Finished: ${summary.finishedAt}`);
 
