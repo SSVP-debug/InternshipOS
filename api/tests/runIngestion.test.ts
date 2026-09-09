@@ -18,6 +18,18 @@ function listing(overrides: Partial<CanonicalListing> = {}): CanonicalListing {
     application_url: "https://example.com/job/abc123",
     deadline_date: null,
     posted_date: "2026-08-20",
+    sponsorship_offered: null,
+    citizenship_requirement: null,
+    jurisdiction_country: null,
+    eligible_candidate_countries: null,
+    citizenship_required_countries: null,
+    requires_existing_work_authorization: null,
+    required_degree_types: null,
+    required_majors: null,
+    required_major_match_mode: null,
+    graduation_not_before: null,
+    graduation_not_after: null,
+    required_enrollment_statuses: null,
     ...overrides,
   };
 }

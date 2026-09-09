@@ -5,14 +5,14 @@ import { remoteOkSampleResponse } from "./fixtures/remoteokSample.js";
 describe("parseRemoteOkListings", () => {
   it("reports the raw entry count as fetched, independent of filtering", () => {
     const { fetched } = parseRemoteOkListings(remoteOkSampleResponse);
-    expect(fetched).toBe(5); // all 5 raw entries in the fixture, including the legal notice
+    expect(fetched).toBe(7); // all 7 raw entries in the fixture, including the legal notice
   });
 
   it("drops the leading legal-notice entry and any malformed entries", () => {
     const { listings } = parseRemoteOkListings(remoteOkSampleResponse);
-    // Of 5 raw entries: 1 legal notice + 1 malformed (missing company) +
-    // 1 non-internship posting are dropped -> 2 canonical listings remain.
-    expect(listings).toHaveLength(2);
+    // Of 7 raw entries: 1 legal notice + 1 malformed (missing company) +
+    // 1 non-internship posting are dropped -> 4 canonical listings remain.
+    expect(listings).toHaveLength(4);
   });
 
   it("filters out non-internship postings", () => {
@@ -50,6 +50,53 @@ describe("parseRemoteOkListings", () => {
     const { listings } = parseRemoteOkListings(remoteOkSampleResponse);
     const dataScience = listings.find((l) => l.source_ref === "1010103");
     expect(dataScience?.posted_date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+
+  it("A3.3: leaves jurisdiction_country null — remote-only has no single jurisdiction", () => {
+    const { listings } = parseRemoteOkListings(remoteOkSampleResponse);
+    expect(listings.length).toBeGreaterThan(0);
+    for (const l of listings) {
+      expect(l.jurisdiction_country).toBeNull();
+    }
+  });
+
+  it("A3.3: extracts sponsorship_offered=true from an unambiguous explicit statement", () => {
+    const { listings } = parseRemoteOkListings(remoteOkSampleResponse);
+    const devops = listings.find((l) => l.source_ref === "1010105");
+
+    expect(devops).toBeDefined();
+    expect(devops?.sponsorship_offered).toBe(true);
+  });
+
+  it("A3.3: extracts sponsorship_offered=false from an unambiguous explicit statement", () => {
+    const { listings } = parseRemoteOkListings(remoteOkSampleResponse);
+    const design = listings.find((l) => l.source_ref === "1010106");
+
+    expect(design).toBeDefined();
+    expect(design?.sponsorship_offered).toBe(false);
+  });
+
+  it("A3.3: leaves sponsorship_offered null when the description says nothing about it", () => {
+    const { listings } = parseRemoteOkListings(remoteOkSampleResponse);
+    const frontend = listings.find((l) => l.source_ref === "1010101");
+
+    expect(frontend?.sponsorship_offered).toBeNull();
+  });
+
+  it("A3.3: leaves every other eligibility field null — no evidence exists in RemoteOK's response", () => {
+    const { listings } = parseRemoteOkListings(remoteOkSampleResponse);
+    const frontend = listings.find((l) => l.source_ref === "1010101");
+
+    expect(frontend?.citizenship_requirement).toBeNull();
+    expect(frontend?.eligible_candidate_countries).toBeNull();
+    expect(frontend?.citizenship_required_countries).toBeNull();
+    expect(frontend?.requires_existing_work_authorization).toBeNull();
+    expect(frontend?.required_degree_types).toBeNull();
+    expect(frontend?.required_majors).toBeNull();
+    expect(frontend?.required_major_match_mode).toBeNull();
+    expect(frontend?.graduation_not_before).toBeNull();
+    expect(frontend?.graduation_not_after).toBeNull();
+    expect(frontend?.required_enrollment_statuses).toBeNull();
   });
 
   it("returns an empty result for a non-array input instead of throwing", () => {

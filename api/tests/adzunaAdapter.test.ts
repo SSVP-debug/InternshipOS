@@ -5,14 +5,14 @@ import { adzunaSampleResponse } from "./fixtures/adzunaSample.js";
 describe("parseAdzunaListings", () => {
   it("reports the raw result count as fetched, independent of filtering", () => {
     const { fetched } = parseAdzunaListings(adzunaSampleResponse);
-    expect(fetched).toBe(7); // all 7 raw results returned by the API, before any filtering
+    expect(fetched).toBe(9); // all 9 raw results returned by the API, before any filtering
   });
 
   it("drops non-internship postings and the malformed entry missing company", () => {
     const { listings } = parseAdzunaListings(adzunaSampleResponse);
-    // Of 7 raw results: 1 malformed (missing company.display_name) and 2
-    // non-internship postings are dropped -> 4 canonical listings remain.
-    expect(listings).toHaveLength(4);
+    // Of 9 raw results: 1 malformed (missing company.display_name) and 2
+    // non-internship postings are dropped -> 6 canonical listings remain.
+    expect(listings).toHaveLength(6);
   });
 
   it("never treats 'International ...' as an internship match (word-boundary filter)", () => {
@@ -41,6 +41,53 @@ describe("parseAdzunaListings", () => {
     expect(swIntern?.skills).toEqual([]);
     expect(swIntern?.posted_date).toBe("2026-08-15");
     expect(swIntern?.application_url).toBe("https://www.adzuna.in/land/ad/4455667788");
+  });
+
+  it("A3.3: sets jurisdiction_country to the adapter's own India endpoint scope on every listing", () => {
+    const { listings } = parseAdzunaListings(adzunaSampleResponse);
+    expect(listings.length).toBeGreaterThan(0);
+    for (const l of listings) {
+      expect(l.jurisdiction_country).toBe("IN");
+    }
+  });
+
+  it("A3.3: extracts sponsorship_offered=true from an unambiguous explicit statement", () => {
+    const { listings } = parseAdzunaListings(adzunaSampleResponse);
+    const cloudIntern = listings.find((l) => l.source_ref === "4455667797");
+
+    expect(cloudIntern).toBeDefined();
+    expect(cloudIntern?.sponsorship_offered).toBe(true);
+  });
+
+  it("A3.3: extracts sponsorship_offered=false from an unambiguous explicit statement", () => {
+    const { listings } = parseAdzunaListings(adzunaSampleResponse);
+    const legalIntern = listings.find((l) => l.source_ref === "4455667798");
+
+    expect(legalIntern).toBeDefined();
+    expect(legalIntern?.sponsorship_offered).toBe(false);
+  });
+
+  it("A3.3: leaves sponsorship_offered null when the description says nothing about it", () => {
+    const { listings } = parseAdzunaListings(adzunaSampleResponse);
+    const swIntern = listings.find((l) => l.source_ref === "4455667788");
+
+    expect(swIntern?.sponsorship_offered).toBeNull();
+  });
+
+  it("A3.3: leaves every other eligibility field null — no evidence exists in Adzuna's response", () => {
+    const { listings } = parseAdzunaListings(adzunaSampleResponse);
+    const swIntern = listings.find((l) => l.source_ref === "4455667788");
+
+    expect(swIntern?.citizenship_requirement).toBeNull();
+    expect(swIntern?.eligible_candidate_countries).toBeNull();
+    expect(swIntern?.citizenship_required_countries).toBeNull();
+    expect(swIntern?.requires_existing_work_authorization).toBeNull();
+    expect(swIntern?.required_degree_types).toBeNull();
+    expect(swIntern?.required_majors).toBeNull();
+    expect(swIntern?.required_major_match_mode).toBeNull();
+    expect(swIntern?.graduation_not_before).toBeNull();
+    expect(swIntern?.graduation_not_after).toBeNull();
+    expect(swIntern?.required_enrollment_statuses).toBeNull();
   });
 
   it("A3.1: populates skills via deterministic extraction when the description contains unambiguous terms", () => {

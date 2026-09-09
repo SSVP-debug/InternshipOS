@@ -79,5 +79,30 @@ export const adzunaSampleResponse: unknown = {
       description: "Design internship, malformed fixture case.",
       created: "2026-08-11T06:12:00Z",
     },
+    {
+      // A3.3: real-shaped listing with an unambiguous, explicit
+      // sponsorship-offered statement — proves extraction populates
+      // sponsorship_offered end to end through the adapter.
+      id: "4455667797",
+      title: "Cloud Infrastructure Intern",
+      company: { display_name: "Kavali Systems Pvt Ltd" },
+      location: { display_name: "Hyderabad, Telangana" },
+      description:
+        "Join our cloud team as an intern working on AWS infrastructure. Visa sponsorship available for exceptional candidates.",
+      redirect_url: "https://www.adzuna.in/land/ad/4455667797",
+      created: "2026-08-08T06:12:00Z",
+    },
+    {
+      // A3.3: real-shaped listing with an unambiguous, explicit
+      // sponsorship-not-offered statement.
+      id: "4455667798",
+      title: "Legal Affairs Intern",
+      company: { display_name: "Global Traders" },
+      location: { display_name: "Mumbai, Maharashtra" },
+      description:
+        "Support our legal team with contract review and compliance research. This role does not offer visa sponsorship.",
+      redirect_url: "https://www.adzuna.in/land/ad/4455667798",
+      created: "2026-08-07T06:12:00Z",
+    },
   ],
 };

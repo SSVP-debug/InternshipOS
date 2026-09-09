@@ -49,4 +49,29 @@ export const remoteOkSampleResponse: unknown[] = [
     tags: ["marketing"],
     description: "<p>Marketing internship, no company listed (malformed fixture case).</p>",
   },
+  {
+    // A3.3: real-shaped listing with an unambiguous, explicit
+    // sponsorship-offered statement — proves extraction populates
+    // sponsorship_offered end to end through this adapter too.
+    id: "1010105",
+    position: "DevOps Intern",
+    company: "Nimbus Labs",
+    tags: ["devops", "aws"],
+    description: "<p>Remote DevOps internship. Visa sponsorship available for outstanding interns.</p>",
+    location: "Worldwide",
+    url: "https://remoteok.com/remote-jobs/1010105-devops-intern-nimbus-labs",
+    date: "2026-08-09T09:00:00+00:00",
+  },
+  {
+    // A3.3: real-shaped listing with an unambiguous, explicit
+    // sponsorship-not-offered statement.
+    id: "1010106",
+    position: "Product Design Intern",
+    company: "Vellum Analytics",
+    tags: ["design"],
+    description: "<p>Remote design internship. Unfortunately we are unable to sponsor a visa for this role.</p>",
+    location: "Worldwide",
+    url: "https://remoteok.com/remote-jobs/1010106-product-design-intern-vellum-analytics",
+    date: "2026-08-08T09:00:00+00:00",
+  },
 ];

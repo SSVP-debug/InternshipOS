@@ -16,12 +16,16 @@
 // separate enrichment phase, not something this mapper does implicitly.
 //
 // Because every currently-ingested opportunity_source row (Adzuna,
-// RemoteOK) has every one of these eligibility columns NULL today (see
-// the Phase 2 inspection, finding G), this mapper is expected to produce
-// an OpportunityMatchInput with every eligibility field null for every
-// real row until a future enrichment phase populates them — and
-// matchCandidate() is expected to resolve that to eligibility: "unknown"
-// as a result. That is correct, not a bug in this mapper.
+// RemoteOK) had every one of these eligibility columns NULL before A3.3,
+// this mapper used to be expected to produce every eligibility field
+// null for every real row, with matchCandidate() resolving that to
+// eligibility: "unknown". A3.3 changed what ingestion writes (not this
+// mapper): jurisdiction_country and sponsorship_offered can now be
+// non-null for some rows (see the adapters' own module headers for
+// which fields, and why every other eligibility column is still always
+// NULL from both sources today). This mapper's own behavior is
+// unchanged — it was already a pure, honest pass-through of whatever
+// the row contains; it just now sometimes receives non-null input.
 
 import type { CandidateEducationSignal, MajorMatchMode, OpportunityMatchInput } from "../matchEngine.js";
 

@@ -19,6 +19,18 @@ function listing(overrides: Partial<CanonicalListing> = {}): CanonicalListing {
     application_url: "https://example.com/job/1010101",
     deadline_date: null,
     posted_date: "2026-08-10",
+    sponsorship_offered: null,
+    citizenship_requirement: null,
+    jurisdiction_country: null,
+    eligible_candidate_countries: null,
+    citizenship_required_countries: null,
+    requires_existing_work_authorization: null,
+    required_degree_types: null,
+    required_majors: null,
+    required_major_match_mode: null,
+    graduation_not_before: null,
+    graduation_not_after: null,
+    required_enrollment_statuses: null,
     ...overrides,
   };
 }
@@ -98,5 +110,43 @@ describe("writeOpportunitySource", () => {
 
     expect(summary).toEqual({ sourceName: "remoteok", inserted: 0, updated: 0, failed: 0, errors: [] });
     expect(supabase.from).not.toHaveBeenCalled();
+  });
+
+  it("A3.3: writes every eligibility column from the listing into the upserted row", async () => {
+    const supabase = mockSupabase({ existingFingerprints: [] });
+    const eligibleListing = listing({
+      sponsorship_offered: true,
+      citizenship_requirement: null,
+      jurisdiction_country: "IN",
+      eligible_candidate_countries: null,
+      citizenship_required_countries: null,
+      requires_existing_work_authorization: null,
+      required_degree_types: null,
+      required_majors: null,
+      required_major_match_mode: null,
+      graduation_not_before: null,
+      graduation_not_after: null,
+      required_enrollment_statuses: null,
+    });
+
+    await writeOpportunitySource(supabase, "remoteok", [eligibleListing]);
+
+    const fromResult = supabase.from.mock.results[1].value; // [0] = select lookup, [1] = upsert
+    const [rows] = fromResult.upsert.mock.calls[0];
+
+    expect(rows[0]).toMatchObject({
+      sponsorship_offered: true,
+      citizenship_requirement: null,
+      jurisdiction_country: "IN",
+      eligible_candidate_countries: null,
+      citizenship_required_countries: null,
+      requires_existing_work_authorization: null,
+      required_degree_types: null,
+      required_majors: null,
+      required_major_match_mode: null,
+      graduation_not_before: null,
+      graduation_not_after: null,
+      required_enrollment_statuses: null,
+    });
   });
 });

@@ -17,10 +17,31 @@
 // This adapter is remote-only by construction (RemoteOK only lists
 // remote roles), so work_mode is always "remote" — never inferred from
 // free text the way the Adzuna adapter has to.
+//
+// A3.3 eligibility fields:
+//   - jurisdiction_country is left null, deliberately, unlike Adzuna.
+//     "Remote" does not imply a single jurisdiction — RemoteOK is a
+//     global feed with no per-run country scoping the way Adzuna's
+//     COUNTRY constant provides, so there is no equivalent structural
+//     signal here. RemoteOK's own `location` field (e.g. "Worldwide",
+//     "USA Only", "Europe") is source-provided but describes a
+//     residency/timezone preference, not a citizenship or
+//     work-authorization jurisdiction fact — mapping it onto
+//     jurisdiction_country or eligible_candidate_countries would
+//     conflate "must be located in" with "must be a citizen of", which
+//     the country-neutral eligibility columns don't ask for and the
+//     conservatism rule in the A3.3 brief specifically warns against
+//     inventing. Left null; see the A3.3 implementation report.
+//   - sponsorship_offered is extracted from title+description via the
+//     same narrow, bounded phrase list Adzuna uses — see
+//     extractEligibilitySignals.ts.
+//   - Every other eligibility column has no comparably reliable signal
+//     in RemoteOK's response and is left null.
 
 import { cleanLine, cleanText, isInternshipRelevant, toIsoDate } from "../normalize.js";
 import type { AdapterRunResult, CanonicalListing, SourceAdapter } from "../types.js";
 import { normalizeSkillList } from "../../skillNormalization.js";
+import { extractSponsorshipSignal } from "../extractEligibilitySignals.js";
 
 const SOURCE_NAME = "remoteok";
 const API_URL = "https://remoteok.com/api?tag=internship";
@@ -135,6 +156,20 @@ export function parseRemoteOkListings(raw: unknown): { listings: CanonicalListin
       application_url: applicationUrl,
       deadline_date: null, // RemoteOK does not publish deadlines
       posted_date: postedDate,
+
+      // A3.3 — see module header for the reasoning behind each field.
+      sponsorship_offered: extractSponsorshipSignal(title, description),
+      citizenship_requirement: null,
+      jurisdiction_country: null,
+      eligible_candidate_countries: null,
+      citizenship_required_countries: null,
+      requires_existing_work_authorization: null,
+      required_degree_types: null,
+      required_majors: null,
+      required_major_match_mode: null,
+      graduation_not_before: null,
+      graduation_not_after: null,
+      required_enrollment_statuses: null,
     });
   }
 

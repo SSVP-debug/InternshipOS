@@ -18,14 +18,42 @@
 // "hybrid" mention in the description, else null/unstated). This
 // mirrors the tri-state "NULL means unstated, never assumed" discipline
 // already established for opportunity_source in 0022/0023.
+//
+// A3.3 eligibility fields:
+//   - jurisdiction_country is always "in" — NOT a text-parsing guess.
+//     This adapter's `COUNTRY` constant is the actual Adzuna endpoint
+//     this run queried (/v1/api/jobs/in/search/...); every listing it
+//     can possibly return is already scoped to Adzuna's India jobs
+//     market by Adzuna itself, before any parsing happens here. This is
+//     structural source metadata — the same kind of "explicit source
+//     metadata" the task brief asks to prefer over keyword guessing —
+//     it just comes from adapter configuration rather than a response
+//     field.
+//   - sponsorship_offered is extracted from title+description via the
+//     narrow, bounded phrase list in extractEligibilitySignals.ts (A3.3)
+//     — see that module for the conservative-extraction rules and their
+//     rationale.
+//   - Every other eligibility column (citizenship_requirement,
+//     eligible_candidate_countries, citizenship_required_countries,
+//     requires_existing_work_authorization, required_degree_types,
+//     required_majors, required_major_match_mode,
+//     graduation_not_before/after, required_enrollment_statuses) has no
+//     comparably reliable signal in Adzuna's response — its raw
+//     description is exactly the kind of free-text citizenship-adjacent
+//     content the Phase 1B.6 design doc warns against parsing — and is
+//     left null. See the A3.3 implementation report.
 
 import { cleanLine, cleanText, isInternshipRelevant, toIsoDate } from "../normalize.js";
 import { extractSkillsFromText } from "../extractSkills.js";
+import { extractSponsorshipSignal } from "../extractEligibilitySignals.js";
 import type { AdapterRunResult, CanonicalListing, SourceAdapter } from "../types.js";
 import { normalizeSkillList } from "../../skillNormalization.js";
 
 const SOURCE_NAME = "adzuna";
 const COUNTRY = "in";
+// A3.3 — uppercase ISO form of COUNTRY, for opportunity_source.jurisdiction_country
+// (see the module header's eligibility-fields note).
+const JURISDICTION_COUNTRY_CODE = "IN";
 const RESULTS_PER_PAGE = 50;
 const PAGES_PER_RUN = 2; // keep the MVP's per-run volume small and predictable
 const MAX_RETRIES = 3;
@@ -195,6 +223,25 @@ export function parseAdzunaListings(raw: unknown): { listings: CanonicalListing[
       application_url: result.redirect_url ?? null,
       deadline_date: null, // Adzuna does not publish application deadlines
       posted_date: toIsoDate(result.created ?? null),
+
+      // A3.3 — see module header for the reasoning behind each field.
+      // JURISDICTION_COUNTRY_CODE is the uppercase ISO form ("IN"),
+      // matching the convention already used by
+      // work_authorization.citizenship_country (see schemas.ts /
+      // matchEngine.ts fixtures) — COUNTRY itself stays lowercase
+      // because that's the literal path segment Adzuna's API requires.
+      sponsorship_offered: extractSponsorshipSignal(title, description),
+      citizenship_requirement: null,
+      jurisdiction_country: JURISDICTION_COUNTRY_CODE,
+      eligible_candidate_countries: null,
+      citizenship_required_countries: null,
+      requires_existing_work_authorization: null,
+      required_degree_types: null,
+      required_majors: null,
+      required_major_match_mode: null,
+      graduation_not_before: null,
+      graduation_not_after: null,
+      required_enrollment_statuses: null,
     });
   }
 

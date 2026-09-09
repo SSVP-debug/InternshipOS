@@ -10,10 +10,17 @@
 //
 // Upsert key is dedup_fingerprint (unique, not null per 0022) — re-
 // running ingestion updates the existing row's fields + last_seen_at
-// instead of creating a duplicate. first_seen_at, created_at, status,
-// and every 0023 eligibility column are intentionally left alone on
-// conflict: first_seen_at should never move once set, and neither
-// ingestion source produces eligibility data in this milestone.
+// instead of creating a duplicate. first_seen_at, created_at, and status
+// are intentionally left alone on conflict: first_seen_at should never
+// move once set.
+//
+// A3.3: every 0022/0023 eligibility column is now written from
+// CanonicalListing (see types.ts) on both insert and update — a
+// re-ingested listing whose source text changes (e.g. a posting is
+// edited to add a sponsorship statement) should have its eligibility
+// signal refreshed, not frozen at first-seen. Every adapter always sets
+// these fields explicitly (to a real value or `null`), so this upsert
+// never needs a fallback/default here.
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { computeDedupFingerprint } from "./dedupFingerprint.js";
@@ -55,6 +62,18 @@ export async function writeOpportunitySource(
     application_url: listing.application_url,
     deadline_date: listing.deadline_date,
     posted_date: listing.posted_date,
+    sponsorship_offered: listing.sponsorship_offered,
+    citizenship_requirement: listing.citizenship_requirement,
+    jurisdiction_country: listing.jurisdiction_country,
+    eligible_candidate_countries: listing.eligible_candidate_countries,
+    citizenship_required_countries: listing.citizenship_required_countries,
+    requires_existing_work_authorization: listing.requires_existing_work_authorization,
+    required_degree_types: listing.required_degree_types,
+    required_majors: listing.required_majors,
+    required_major_match_mode: listing.required_major_match_mode,
+    graduation_not_before: listing.graduation_not_before,
+    graduation_not_after: listing.graduation_not_after,
+    required_enrollment_statuses: listing.required_enrollment_statuses,
     dedup_fingerprint: computeDedupFingerprint(listing.source_name, listing.source_ref),
     last_seen_at: new Date().toISOString(),
     status: "active" as const,
