@@ -10,10 +10,11 @@
 // and does NOT add any ranking beyond the deterministic ordering
 // specified below — match_score itself is Phase 2A's unmodified
 // matchEngine.ts output, already stored on the opportunity_match row.
-// It DOES do one additional thing beyond a pure join+sort: collapsing
-// obvious cross-source duplicates (see collapseDuplicateSources below) —
-// still a pure, deterministic transform of the same input data, not a
-// new ranking signal.
+// It DOES do two additional things beyond a pure join+sort: collapsing
+// obvious cross-source duplicates (see collapseDuplicateSources below),
+// and (A3.1) omitting untriaged zero-score matches from what's shown
+// (see MIN_SURFACED_MATCH_SCORE below) — both are deterministic filters
+// of the same input data, not new ranking signals.
 
 export interface OpportunityMatchRow {
   id: string;
@@ -65,6 +66,40 @@ export interface OpportunityFeedItem {
   // the common case of a listing with no detected duplicate.
   duplicate_source_count: number;
 }
+
+// A3.1 — minimum-score presentation threshold ───────────────────────
+//
+// Per the A3.1 design audit: every active opportunity is matched
+// against every candidate on every daily run (runMatchingForCandidate.ts),
+// with no score floor before a row is written — so opportunity_match can
+// contain many rows with a genuinely zero (or near-zero) score,
+// including opportunities with no shared skills, no education signal,
+// and no experience signal at all. Nothing about that write path is
+// changed here (existing rows, their scores, and their persistence are
+// untouched) — this is a presentation-only filter, in line with the
+// audit's recommended "create every match, surface only above a
+// threshold" approach (Option A).
+//
+// The threshold is deliberately conservative: it filters out only an
+// EXACT-ZERO score (no measured signal on any of the four scoring
+// components at all), not a broader, untested cutoff like "50." A real
+// score-distribution query against live data (see the A3.1 audit's §3)
+// is what should inform any future adjustment of this number — it is
+// not invented here.
+//
+// The filter applies ONLY to items the candidate hasn't triaged yet
+// (inbox_status === "new"). An item the candidate has already saved or
+// dismissed is never hidden by this threshold, regardless of its score
+// — a candidate's own prior triage decision is never silently
+// overridden by a presentation-layer filter added after the fact.
+//
+// Today's feed_summary (todayView.ts) is built entirely from this
+// function's output (see today.ts, which calls buildOpportunityFeed()
+// for both the flat feed and each resume group) — so this one change is
+// the "one shared, presentation-side threshold applied consistently to
+// Feed and Today" the A3.1 design called for, without needing a second,
+// independently-tuned filter in todayView.ts.
+export const MIN_SURFACED_MATCH_SCORE = 1;
 
 /**
  * Cross-source duplicate collapsing (P2 follow-up to the original audit,
@@ -214,6 +249,11 @@ export function buildOpportunityFeed(
   for (const match of matches) {
     const source = activeSourcesById.get(match.opportunity_source_id);
     if (!source) continue; // missing or inactive source — drop safely, never throw
+
+    // A3.1: an obviously zero-signal match the candidate hasn't looked
+    // at yet is not surfaced — but only while it's still untriaged (see
+    // MIN_SURFACED_MATCH_SCORE's own comment for the full rationale).
+    if (match.inbox_status === "new" && match.match_score < MIN_SURFACED_MATCH_SCORE) continue;
 
     const { reasons, missing, unknown } = extractExplanation(match.match_breakdown);
 

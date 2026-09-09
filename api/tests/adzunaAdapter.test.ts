@@ -5,14 +5,14 @@ import { adzunaSampleResponse } from "./fixtures/adzunaSample.js";
 describe("parseAdzunaListings", () => {
   it("reports the raw result count as fetched, independent of filtering", () => {
     const { fetched } = parseAdzunaListings(adzunaSampleResponse);
-    expect(fetched).toBe(5); // all 5 raw results returned by the API, before any filtering
+    expect(fetched).toBe(7); // all 7 raw results returned by the API, before any filtering
   });
 
   it("drops non-internship postings and the malformed entry missing company", () => {
     const { listings } = parseAdzunaListings(adzunaSampleResponse);
-    // Of 5 raw results: 1 malformed (missing company.display_name) and 2
-    // non-internship postings are dropped -> 2 canonical listings remain.
-    expect(listings).toHaveLength(2);
+    // Of 7 raw results: 1 malformed (missing company.display_name) and 2
+    // non-internship postings are dropped -> 4 canonical listings remain.
+    expect(listings).toHaveLength(4);
   });
 
   it("never treats 'International ...' as an internship match (word-boundary filter)", () => {
@@ -33,9 +33,36 @@ describe("parseAdzunaListings", () => {
     expect(swIntern?.company).toBe("Kavali Systems Pvt Ltd");
     expect(swIntern?.location).toBe("Bengaluru, Karnataka");
     expect(swIntern?.employment_type).toBe("internship");
-    expect(swIntern?.skills).toEqual([]); // Adzuna: no structured skills signal, never guessed
+    // A3.1: this fixture's description legitimately contains no
+    // vocabulary term, so skills is still correctly [] — extraction was
+    // run, it just found nothing, exactly the "never guessed, never
+    // defaulted to non-empty" behavior the design calls for. See the
+    // two tests below for the populated and false-positive-guarded cases.
+    expect(swIntern?.skills).toEqual([]);
     expect(swIntern?.posted_date).toBe("2026-08-15");
     expect(swIntern?.application_url).toBe("https://www.adzuna.in/land/ad/4455667788");
+  });
+
+  it("A3.1: populates skills via deterministic extraction when the description contains unambiguous terms", () => {
+    const { listings } = parseAdzunaListings(adzunaSampleResponse);
+    const backendIntern = listings.find((l) => l.source_ref === "4455667793");
+
+    expect(backendIntern).toBeDefined();
+    expect(backendIntern?.skills).toEqual(
+      expect.arrayContaining(["rest api", "node", "express", "postgresql", "python", "git"]),
+    );
+  });
+
+  it("A3.1: does not extract false-positive skills from ordinary internship-posting boilerplate", () => {
+    const { listings } = parseAdzunaListings(adzunaSampleResponse);
+    const operationsIntern = listings.find((l) => l.source_ref === "4455667794");
+
+    expect(operationsIntern).toBeDefined();
+    // "Spring 2026" and "go the extra mile" are exactly the kind of
+    // ordinary posting boilerplate the extractor's false-positive guards
+    // are designed to ignore (see extractSkills.test.ts for the unit-
+    // level coverage of these same guards).
+    expect(operationsIntern?.skills).toEqual([]);
   });
 
   it("infers work_mode only from an explicit remote/hybrid mention in the description", () => {

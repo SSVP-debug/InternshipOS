@@ -31,6 +31,9 @@ const ALIASES: Record<string, string> = {
   reactjs: "react",
   react: "react",
 
+  javascript: "javascript",
+  js: "javascript",
+
   "node js": "node",
   nodejs: "node",
   node: "node",

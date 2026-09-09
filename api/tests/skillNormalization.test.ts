@@ -15,6 +15,12 @@ describe("normalizeSkillName — aliasing", () => {
     expect(normalizeSkillName("Node")).toBe("node");
   });
 
+  it("collapses JavaScript / JS to the same normalized value (A3.1)", () => {
+    expect(normalizeSkillName("JavaScript")).toBe("javascript");
+    expect(normalizeSkillName("JS")).toBe("javascript");
+    expect(normalizeSkillName("js")).toBe("javascript");
+  });
+
   it("collapses Express.js / ExpressJS / Express to the same normalized value", () => {
     expect(normalizeSkillName("Express.js")).toBe("express");
     expect(normalizeSkillName("ExpressJS")).toBe("express");

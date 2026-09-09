@@ -7,17 +7,22 @@
 // what=internship, which is exactly the sanctioned, documented
 // integration path — not scraping.
 //
-// Adzuna has no structured skills field and no reliable structured
-// work-mode signal, so both are left conservative here (skills: [],
-// work_mode inferred only from an explicit "remote"/"hybrid" mention in
-// the description, else null/unstated) rather than guessed. This
+// Adzuna has no structured skills field, so skills are derived via
+// deterministic keyword extraction from title+description (see
+// extractSkills.ts — A3.1) rather than a structured source field the
+// way RemoteOK's `tags` are. Extraction is conservative: a listing with
+// no recognizable vocabulary term still legitimately yields skills: []
+// — this is never guessed or defaulted to something non-empty. Adzuna
+// also has no reliable structured work-mode signal, so that's still
+// left conservative too (inferred only from an explicit "remote"/
+// "hybrid" mention in the description, else null/unstated). This
 // mirrors the tri-state "NULL means unstated, never assumed" discipline
-// already established for opportunity_source in 0022/0023 — inventing a
-// free-text skill extractor for Adzuna specifically was considered and
-// deferred as unnecessary complexity for this milestone.
+// already established for opportunity_source in 0022/0023.
 
 import { cleanLine, cleanText, isInternshipRelevant, toIsoDate } from "../normalize.js";
+import { extractSkillsFromText } from "../extractSkills.js";
 import type { AdapterRunResult, CanonicalListing, SourceAdapter } from "../types.js";
+import { normalizeSkillList } from "../../skillNormalization.js";
 
 const SOURCE_NAME = "adzuna";
 const COUNTRY = "in";
@@ -186,7 +191,7 @@ export function parseAdzunaListings(raw: unknown): { listings: CanonicalListing[
       location: cleanLine(result.location?.display_name ?? null),
       work_mode: inferWorkMode(description),
       employment_type: "internship",
-      skills: [],
+      skills: normalizeSkillList(extractSkillsFromText(title, description)),
       application_url: result.redirect_url ?? null,
       deadline_date: null, // Adzuna does not publish application deadlines
       posted_date: toIsoDate(result.created ?? null),

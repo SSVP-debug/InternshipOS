@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildOpportunityFeed, normalizeForDedup } from "../src/lib/opportunityFeed.js";
+import { buildOpportunityFeed, normalizeForDedup, MIN_SURFACED_MATCH_SCORE } from "../src/lib/opportunityFeed.js";
 import type { OpportunityMatchRow, OpportunitySourceRow } from "../src/lib/opportunityFeed.js";
 
 function matchRow(overrides: Partial<OpportunityMatchRow> = {}): OpportunityMatchRow {
@@ -176,6 +176,73 @@ describe("buildOpportunityFeed", () => {
   it("a fresh item with no cross-source duplicate has duplicate_source_count 0", () => {
     const items = buildOpportunityFeed([matchRow()], [sourceRow({ id: "source-1" })]);
     expect(items[0].duplicate_source_count).toBe(0);
+  });
+});
+
+describe("buildOpportunityFeed — A3.1 minimum-score threshold", () => {
+  it("omits an untriaged (inbox_status='new') match scoring below MIN_SURFACED_MATCH_SCORE", () => {
+    const items = buildOpportunityFeed(
+      [matchRow({ id: "m-zero", opportunity_source_id: "s1", match_score: 0, inbox_status: "new" })],
+      [sourceRow({ id: "s1" })]
+    );
+    expect(items).toHaveLength(0);
+  });
+
+  it("keeps an untriaged match scoring at or above MIN_SURFACED_MATCH_SCORE", () => {
+    const items = buildOpportunityFeed(
+      [matchRow({ id: "m-low", opportunity_source_id: "s1", match_score: MIN_SURFACED_MATCH_SCORE, inbox_status: "new" })],
+      [sourceRow({ id: "s1" })]
+    );
+    expect(items).toHaveLength(1);
+    expect(items[0].opportunity_match_id).toBe("m-low");
+  });
+
+  it("never hides a SAVED match, regardless of score — a candidate's own triage decision is never overridden", () => {
+    const items = buildOpportunityFeed(
+      [matchRow({ id: "m-saved", opportunity_source_id: "s1", match_score: 0, inbox_status: "saved" })],
+      [sourceRow({ id: "s1" })]
+    );
+    expect(items).toHaveLength(1);
+    expect(items[0].opportunity_match_id).toBe("m-saved");
+  });
+
+  it("never hides a DISMISSED match, regardless of score — same reasoning as saved", () => {
+    const items = buildOpportunityFeed(
+      [matchRow({ id: "m-dismissed", opportunity_source_id: "s1", match_score: 0, inbox_status: "dismissed" })],
+      [sourceRow({ id: "s1" })]
+    );
+    expect(items).toHaveLength(1);
+    expect(items[0].opportunity_match_id).toBe("m-dismissed");
+  });
+
+  it("filters only the zero-score new match out of a mixed batch, preserving the rest", () => {
+    const items = buildOpportunityFeed(
+      [
+        matchRow({ id: "m-zero-new", opportunity_source_id: "s1", match_score: 0, inbox_status: "new" }),
+        matchRow({ id: "m-real-new", opportunity_source_id: "s2", match_score: 40, inbox_status: "new" }),
+        matchRow({ id: "m-zero-saved", opportunity_source_id: "s3", match_score: 0, inbox_status: "saved" }),
+      ],
+      [
+        sourceRow({ id: "s1", title: "Zero New", company: "Co A" }),
+        sourceRow({ id: "s2", title: "Real New", company: "Co B" }),
+        sourceRow({ id: "s3", title: "Zero Saved", company: "Co C" }),
+      ]
+    );
+    const ids = items.map((i) => i.opportunity_match_id).sort();
+    expect(ids).toEqual(["m-real-new", "m-zero-saved"]);
+  });
+
+  it("does not alter match_score, persistence, or any other field for a filtered-out item's still-visible siblings", () => {
+    const items = buildOpportunityFeed(
+      [
+        matchRow({ id: "m-zero", opportunity_source_id: "s1", match_score: 0, inbox_status: "new" }),
+        matchRow({ id: "m-visible", opportunity_source_id: "s2", match_score: 55, inbox_status: "new" }),
+      ],
+      [sourceRow({ id: "s1" }), sourceRow({ id: "s2", title: "Visible One", company: "Visible Co" })]
+    );
+    expect(items).toHaveLength(1);
+    expect(items[0].match_score).toBe(55);
+    expect(items[0].title).toBe("Visible One");
   });
 });
 
