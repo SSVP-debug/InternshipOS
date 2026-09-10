@@ -9,8 +9,9 @@
 //
 // This module adds no scoring/eligibility logic of its own — it is
 // wiring only. It does not rank, sort for presentation, build a feed,
-// or schedule anything; it evaluates every active opportunity once per
-// call and reports what happened.
+// or schedule anything; it evaluates one representative per active,
+// deduplicated opportunity group per call (see A3.3.1 below) and reports
+// what happened.
 //
 // GATE R2 — RESUME SCOPING (optional 3rd parameter, resumeId):
 //   - resumeId omitted/undefined/null (the default): unchanged
@@ -40,9 +41,71 @@
 // mirrors how writeOpportunitySource.ts already writes to
 // opportunity_source under service-role, not the per-request
 // req.supabase pattern the candidate-facing routes use.
+//
+// A3.3.1 — DEDUP-AWARE MATCHING:
+//
+// Traced during the A3.3 design review: this module used to call
+// matchCandidate() and upsert an opportunity_match row for EVERY active
+// opportunity_source row, unconditionally — including when two (or more)
+// rows represent the same real-world posting (e.g. the same internship
+// ingested from both Adzuna and RemoteOK, or a repost under a new
+// source_ref). That cost is real and compounding: runMatchingForActiveCandidates.ts
+// calls this once per candidate PLUS once per that candidate's active
+// resume, daily — so one duplicate pair in the catalog multiplies into
+// (1 + active resume count) extra matchCandidate() calls and extra
+// opportunity_match rows, per candidate, every single run.
+//
+// selectMatchableRepresentatives() below groups the freshly-loaded ACTIVE
+// rows by the SAME conservative, already-shipped, already-tested
+// buildDedupKey(title, company, location) that opportunityFeed.ts uses to
+// collapse duplicates for display and opportunity-feed.ts (the route)
+// uses to prevent a duplicate application at apply time — reusing that
+// one function, not inventing a second, differently-tuned notion of
+// "duplicate." Only one representative per group is actually matched.
+//
+// This is DELIBERATELY NOT a persisted grouping (no new column, no
+// migration): grouping is recomputed fresh from whatever is currently
+// status = 'active' on every run, which is what makes it self-healing
+// around A3.2's freshness expiry with zero changes to that logic — if
+// today's representative later expires, it simply drops out of
+// loadActiveOpportunitySourceRows's own `status = 'active'` filter, and
+// the remaining active duplicate (if any) becomes the representative on
+// the very next run, with no re-canonicalization step required.
+//
+// Representative selection uses the lowest opportunity_source_id
+// (ascending, string comparison) — a DIFFERENT tie-break than
+// collapseDuplicateSources's "keep the highest match_score," and
+// deliberately so: at matching time no scores exist yet (computing them
+// is the exact cost being avoided), so the tie-break can only use data
+// available before matching. The id order has no semantic meaning beyond
+// being deterministic and stable for a given pair of rows.
+//
+// PROVENANCE IS FULLY PRESERVED: no opportunity_source row is deleted,
+// merged, or altered by this change. A non-representative row's own
+// source_url/application_url/source_ref/etc. remain exactly as ingested
+// — this only changes which rows get matched, never what's stored about
+// them. Reversible without any migration: removing the grouping step and
+// re-running matching for all active rows restores the old behavior
+// exactly, since nothing was ever deleted.
+//
+// KNOWN, ACCEPTED TRANSITIONAL LIMITATION: an opportunity_match row that
+// already existed for a non-representative row (created before this
+// change shipped, or by a resume-scoped pass in the same run that
+// happened to group differently — see buildOpportunityMatchInput's own
+// per-row shape, unaffected) simply stops being refreshed going forward;
+// it is not deleted. Feed/Today's own collapseDuplicateSources may show
+// that stale row's score for a while if it's currently higher than the
+// freshly-computed representative's, until an operator chooses to clean
+// it up (no automatic cleanup is performed here — deleting rows is
+// explicitly out of scope, see the A3.3 design review's hard
+// constraints on destructive changes). The listing's title/company/
+// location shown to the candidate is unaffected either way, since both
+// rows describe the same real posting by definition of sharing a dedup
+// key.
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { matchCandidate } from "../matchEngine.js";
+import { buildDedupKey } from "../opportunityFeed.js";
 import {
   buildCandidateMatchInput,
   type RawEducationRow,
@@ -59,11 +122,47 @@ const EXPERIENCE_COLUMNS = "employment_type, is_current";
 const PROJECT_COLUMNS = "tech_stack";
 const WORK_AUTH_COLUMNS = "status, requires_sponsorship, citizenship_country";
 
+// A3.3.1: title, company, location are new here — matchEngine.ts itself
+// never needed them (it only scores skills/eligibility fields), but
+// selectMatchableRepresentatives() below needs them to compute the same
+// dedup key opportunityFeed.ts already uses. They are read-only inputs
+// to that grouping step; buildOpportunityMatchInput() still only reads
+// the eligibility/skill columns it always has, ignoring these three.
 const OPPORTUNITY_SOURCE_COLUMNS =
-  "id, employment_type, skills, sponsorship_offered, citizenship_requirement, deadline_date, " +
+  "id, title, company, location, employment_type, skills, sponsorship_offered, citizenship_requirement, deadline_date, " +
   "jurisdiction_country, eligible_candidate_countries, citizenship_required_countries, " +
   "requires_existing_work_authorization, required_degree_types, required_majors, " +
   "required_major_match_mode, graduation_not_before, graduation_not_after, required_enrollment_statuses";
+
+/** The subset of an opportunity_source row selectMatchableRepresentatives() needs — a structural subtype of the full loaded row. */
+interface DedupGroupable {
+  id: string;
+  title: string;
+  company: string;
+  location: string | null;
+}
+
+/**
+ * A3.3.1 — groups active opportunity_source rows by buildDedupKey(title,
+ * company, location) and keeps exactly one representative per group (the
+ * one with the lowest `id`, a stable-but-arbitrary tie-break — see this
+ * file's own top-of-file comment for why score-based selection isn't
+ * available yet at this point in the pipeline). A row with no duplicates
+ * is its own, unaffected representative.
+ */
+function selectMatchableRepresentatives<T extends DedupGroupable>(rows: T[]): T[] {
+  const bestByKey = new Map<string, T>();
+
+  for (const row of rows) {
+    const key = buildDedupKey(row);
+    const existing = bestByKey.get(key);
+    if (!existing || row.id < existing.id) {
+      bestByKey.set(key, row);
+    }
+  }
+
+  return Array.from(bestByKey.values());
+}
 
 export interface EligibilityCounts {
   eligible: number;
@@ -75,6 +174,16 @@ export interface RunMatchingSummary {
   candidateId: string;
   /** Gate R2: null for the candidate-level pass, a resume id for a resume-scoped pass. Always present (not optional) so callers can't forget to check it. */
   resumeId: string | null;
+  /**
+   * A3.3.1: the number of opportunity_source rows actually passed to
+   * matchCandidate() — i.e. after duplicate-group representative
+   * selection, not the raw count of active rows loaded. Before A3.3.1
+   * these were always equal (every active row was matched); a duplicate
+   * catalog pair now counts once here, reflecting the compute that
+   * actually happened. See loadActiveOpportunitySourceRows /
+   * selectMatchableRepresentatives above for how the raw count is
+   * reduced.
+   */
   opportunitiesEvaluated: number;
   insertedOrUpdated: number;
   eligibilityCounts: EligibilityCounts;
@@ -184,16 +293,19 @@ async function loadCandidateMatchInput(
   });
 }
 
+/** A3.3.1: title/company/location are select-only additions for dedup grouping — see this module's top-of-file comment. */
+type LoadedOpportunitySourceRow = RawOpportunitySourceRow & DedupGroupable;
+
 async function loadActiveOpportunitySourceRows(
   supabase: Pick<SupabaseClient, "from">
-): Promise<Array<RawOpportunitySourceRow & { id: string }>> {
+): Promise<LoadedOpportunitySourceRow[]> {
   const { data, error } = await supabase.from("opportunity_source").select(OPPORTUNITY_SOURCE_COLUMNS).eq("status", "active");
 
   if (error) {
     throw new RunMatchingReadError(`Failed to load active opportunity_source rows: ${error.message}`);
   }
 
-  return (data ?? []) as unknown as Array<RawOpportunitySourceRow & { id: string }>;
+  return (data ?? []) as unknown as LoadedOpportunitySourceRow[];
 }
 
 export async function runMatchingForCandidate(
@@ -209,7 +321,10 @@ export async function runMatchingForCandidate(
   // proceed at all, so it throws rather than returning a misleadingly
   // "complete" summary with zero opportunities evaluated.
   const candidateInput = await loadCandidateMatchInput(supabase, candidateId, normalizedResumeId);
-  const opportunityRows = await loadActiveOpportunitySourceRows(supabase);
+  const activeOpportunityRows = await loadActiveOpportunitySourceRows(supabase);
+  // A3.3.1: match only one representative per duplicate group — see this
+  // module's top-of-file comment for the full rationale.
+  const opportunityRows = selectMatchableRepresentatives(activeOpportunityRows);
 
   const rowsToUpsert: Array<{
     candidate_id: string;

@@ -19,18 +19,6 @@ function listing(overrides: Partial<CanonicalListing> = {}): CanonicalListing {
     application_url: "https://example.com/job/1010101",
     deadline_date: null,
     posted_date: "2026-08-10",
-    sponsorship_offered: null,
-    citizenship_requirement: null,
-    jurisdiction_country: null,
-    eligible_candidate_countries: null,
-    citizenship_required_countries: null,
-    requires_existing_work_authorization: null,
-    required_degree_types: null,
-    required_majors: null,
-    required_major_match_mode: null,
-    graduation_not_before: null,
-    graduation_not_after: null,
-    required_enrollment_statuses: null,
     ...overrides,
   };
 }
@@ -43,6 +31,9 @@ function listing(overrides: Partial<CanonicalListing> = {}): CanonicalListing {
  */
 function mockSupabase(options: { existingFingerprints?: string[]; failOn?: "select" | "upsert" } = {}) {
   const existing = new Set(options.existingFingerprints ?? []);
+  // A3.3.2/A3.3.3: captures the exact rows passed to upsert() so tests
+  // can assert on source_name/URL coercion without re-deriving them.
+  const upsertedRows: unknown[] = [];
 
   const from = vi.fn((_table: string) => ({
     select: vi.fn((_cols: string) => ({
@@ -54,7 +45,8 @@ function mockSupabase(options: { existingFingerprints?: string[]; failOn?: "sele
         return { data: matched, error: null };
       }),
     })),
-    upsert: vi.fn(async (_rows: unknown[], _opts: unknown) => {
+    upsert: vi.fn(async (rows: unknown[], _opts: unknown) => {
+      upsertedRows.push(...rows);
       if (options.failOn === "upsert") {
         return { data: null, error: { message: "upsert failed" } };
       }
@@ -62,7 +54,7 @@ function mockSupabase(options: { existingFingerprints?: string[]; failOn?: "sele
     }),
   }));
 
-  return { from } as any;
+  return { from, upsertedRows } as any;
 }
 
 describe("writeOpportunitySource", () => {
@@ -112,41 +104,66 @@ describe("writeOpportunitySource", () => {
     expect(supabase.from).not.toHaveBeenCalled();
   });
 
-  it("A3.3: writes every eligibility column from the listing into the upserted row", async () => {
-    const supabase = mockSupabase({ existingFingerprints: [] });
-    const eligibleListing = listing({
-      sponsorship_offered: true,
-      citizenship_requirement: null,
-      jurisdiction_country: "IN",
-      eligible_candidate_countries: null,
-      citizenship_required_countries: null,
-      requires_existing_work_authorization: null,
-      required_degree_types: null,
-      required_majors: null,
-      required_major_match_mode: null,
-      graduation_not_before: null,
-      graduation_not_after: null,
-      required_enrollment_statuses: null,
-    });
+  // A3.3.2 — persist source_name ───────────────────────────────────────
+  it("A3.3.2: persists source_name on the written row", async () => {
+    const supabase = mockSupabase();
+    await writeOpportunitySource(supabase, "remoteok", [listing({ source_name: "remoteok" })]);
 
-    await writeOpportunitySource(supabase, "remoteok", [eligibleListing]);
+    expect(supabase.upsertedRows).toHaveLength(1);
+    expect(supabase.upsertedRows[0].source_name).toBe("remoteok");
+  });
 
-    const fromResult = supabase.from.mock.results[1].value; // [0] = select lookup, [1] = upsert
-    const [rows] = fromResult.upsert.mock.calls[0];
+  it("A3.3.2: persists a different source_name for a different adapter's listing", async () => {
+    const supabase = mockSupabase();
+    await writeOpportunitySource(supabase, "adzuna", [listing({ source_name: "adzuna", source_ref: "adzuna-1" })]);
 
-    expect(rows[0]).toMatchObject({
-      sponsorship_offered: true,
-      citizenship_requirement: null,
-      jurisdiction_country: "IN",
-      eligible_candidate_countries: null,
-      citizenship_required_countries: null,
-      requires_existing_work_authorization: null,
-      required_degree_types: null,
-      required_majors: null,
-      required_major_match_mode: null,
-      graduation_not_before: null,
-      graduation_not_after: null,
-      required_enrollment_statuses: null,
-    });
+    expect(supabase.upsertedRows[0].source_name).toBe("adzuna");
+  });
+
+  // A3.3.3 — URL validation at ingestion ────────────────────────────────
+  it("A3.3.3: keeps a well-formed https application_url/source_url unchanged", async () => {
+    const supabase = mockSupabase();
+    await writeOpportunitySource(
+      supabase,
+      "remoteok",
+      [listing({ application_url: "https://example.com/apply/1", source_url: "https://example.com/job/1" })]
+    );
+
+    const row = supabase.upsertedRows[0];
+    expect(row.application_url).toBe("https://example.com/apply/1");
+    expect(row.source_url).toBe("https://example.com/job/1");
+  });
+
+  it("A3.3.3: coerces a malformed application_url to null without dropping the rest of the listing", async () => {
+    const supabase = mockSupabase();
+    const summary = await writeOpportunitySource(
+      supabase,
+      "remoteok",
+      [listing({ application_url: "not-a-url", title: "Data Science Intern" })]
+    );
+
+    // The malformed field is nulled out, but the listing is still written
+    // (not rejected wholesale) — every other field is untouched.
+    expect(summary.inserted).toBe(1);
+    expect(summary.failed).toBe(0);
+    const row = supabase.upsertedRows[0];
+    expect(row.application_url).toBeNull();
+    expect(row.title).toBe("Data Science Intern");
+  });
+
+  it("A3.3.3: coerces a malformed source_url to null", async () => {
+    const supabase = mockSupabase();
+    await writeOpportunitySource(supabase, "remoteok", [listing({ source_url: "ftp://example.com/not-http" })]);
+
+    expect(supabase.upsertedRows[0].source_url).toBeNull();
+  });
+
+  it("A3.3.3: coerces a null application_url/source_url to null (not an error)", async () => {
+    const supabase = mockSupabase();
+    await writeOpportunitySource(supabase, "remoteok", [listing({ application_url: null, source_url: null })]);
+
+    const row = supabase.upsertedRows[0];
+    expect(row.application_url).toBeNull();
+    expect(row.source_url).toBeNull();
   });
 });

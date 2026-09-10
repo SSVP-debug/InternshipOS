@@ -12,6 +12,11 @@ const RESUME_A2 = "77777777-7777-7777-7777-777777777777";
 
 const UNENRICHED_OPPORTUNITY_ROW = {
   id: "44444444-4444-4444-4444-444444444444",
+  // A3.3.1: title/company/location are now selected for dedup grouping —
+  // see runMatchingForCandidate.ts's OPPORTUNITY_SOURCE_COLUMNS.
+  title: "Backend Engineering Intern",
+  company: "Acme Corp",
+  location: "Bangalore",
   employment_type: "internship" as const,
   skills: ["python"],
   sponsorship_offered: null,

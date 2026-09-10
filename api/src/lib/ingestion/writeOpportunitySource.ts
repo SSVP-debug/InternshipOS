@@ -10,20 +10,29 @@
 //
 // Upsert key is dedup_fingerprint (unique, not null per 0022) — re-
 // running ingestion updates the existing row's fields + last_seen_at
-// instead of creating a duplicate. first_seen_at, created_at, and status
-// are intentionally left alone on conflict: first_seen_at should never
-// move once set.
+// instead of creating a duplicate. first_seen_at, created_at, status,
+// and every 0023 eligibility column are intentionally left alone on
+// conflict: first_seen_at should never move once set, and neither
+// ingestion source produces eligibility data in this milestone.
 //
-// A3.3: every 0022/0023 eligibility column is now written from
-// CanonicalListing (see types.ts) on both insert and update — a
-// re-ingested listing whose source text changes (e.g. a posting is
-// edited to add a sponsorship statement) should have its eligibility
-// signal refreshed, not frozen at first-seen. Every adapter always sets
-// these fields explicitly (to a real value or `null`), so this upsert
-// never needs a fallback/default here.
+// A3.3.2 — source_name is now persisted (0029_opportunity_source_name.sql
+// added the nullable column). Previously `listing.source_name` was only
+// ever consumed one-way by computeDedupFingerprint below — there was no
+// queryable record of which adapter produced a given row at all. This is
+// the minimum change needed to make source attribution possible; nothing
+// currently reads the new column back (no behavior change beyond storing
+// it).
+//
+// A3.3.3 — application_url/source_url are now passed through
+// coerceToWellFormedUrl before being written. Neither adapter validates
+// these today (see urlValidation.ts's own header) — a malformed value is
+// stored as `null` rather than rejecting the listing, consistent with
+// this project's existing "null means unstated, never a hard failure"
+// discipline (sponsorship_offered, the 0023 eligibility columns).
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { computeDedupFingerprint } from "./dedupFingerprint.js";
+import { coerceToWellFormedUrl } from "./urlValidation.js";
 import type { CanonicalListing, WriteSummary } from "./types.js";
 
 // Supabase JS upsert() does one round trip per call but batches rows
@@ -50,8 +59,9 @@ export async function writeOpportunitySource(
 
   const rows = listings.map((listing) => ({
     source_type: listing.source_type,
+    source_name: listing.source_name,
     source_ref: listing.source_ref,
-    source_url: listing.source_url,
+    source_url: coerceToWellFormedUrl(listing.source_url),
     title: listing.title,
     company: listing.company,
     description: listing.description,
@@ -59,21 +69,9 @@ export async function writeOpportunitySource(
     work_mode: listing.work_mode,
     employment_type: listing.employment_type,
     skills: listing.skills,
-    application_url: listing.application_url,
+    application_url: coerceToWellFormedUrl(listing.application_url),
     deadline_date: listing.deadline_date,
     posted_date: listing.posted_date,
-    sponsorship_offered: listing.sponsorship_offered,
-    citizenship_requirement: listing.citizenship_requirement,
-    jurisdiction_country: listing.jurisdiction_country,
-    eligible_candidate_countries: listing.eligible_candidate_countries,
-    citizenship_required_countries: listing.citizenship_required_countries,
-    requires_existing_work_authorization: listing.requires_existing_work_authorization,
-    required_degree_types: listing.required_degree_types,
-    required_majors: listing.required_majors,
-    required_major_match_mode: listing.required_major_match_mode,
-    graduation_not_before: listing.graduation_not_before,
-    graduation_not_after: listing.graduation_not_after,
-    required_enrollment_statuses: listing.required_enrollment_statuses,
     dedup_fingerprint: computeDedupFingerprint(listing.source_name, listing.source_ref),
     last_seen_at: new Date().toISOString(),
     status: "active" as const,

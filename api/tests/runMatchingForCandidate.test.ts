@@ -10,6 +10,11 @@ const RESUME_ID = "55555555-5555-5555-5555-555555555555";
 /** The exact shape returned by a real ingested-but-unenriched opportunity_source row (see Phase 2 inspection, finding G). */
 const UNENRICHED_OPPORTUNITY_ROW = {
   id: "22222222-2222-2222-2222-222222222222",
+  // A3.3.1: title/company/location are now selected for dedup grouping —
+  // see runMatchingForCandidate.ts's OPPORTUNITY_SOURCE_COLUMNS.
+  title: "Backend Engineering Intern",
+  company: "Acme Corp",
+  location: "Bangalore",
   employment_type: "internship" as const,
   skills: ["python"],
   sponsorship_offered: null,
@@ -265,5 +270,102 @@ describe("runMatchingForCandidate", () => {
     expect(summary.opportunitiesEvaluated).toBe(0);
     expect(summary.insertedOrUpdated).toBe(0);
     expect(supabase.rpcMock).not.toHaveBeenCalled();
+  });
+
+  // A3.3.1 — dedup-aware matching ─────────────────────────────────────
+  describe("A3.3.1: dedup-aware matching", () => {
+    it("matches only one representative when two active rows share the same title+company+location", async () => {
+      const rowA = { ...UNENRICHED_OPPORTUNITY_ROW, id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" };
+      const rowB = { ...UNENRICHED_OPPORTUNITY_ROW, id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" };
+
+      const supabase = mockSupabase({
+        tableResults: {
+          skill: { data: [{ name: "python" }], error: null },
+          opportunity_source: { data: [rowA, rowB], error: null },
+        },
+      });
+
+      const summary = await runMatchingForCandidate(supabase, CANDIDATE_ID);
+
+      // Only one representative evaluated/upserted, not two, even though
+      // two active opportunity_source rows exist.
+      expect(summary.opportunitiesEvaluated).toBe(1);
+      expect(summary.insertedOrUpdated).toBe(1);
+      expect(supabase.rpcMock).toHaveBeenCalledTimes(1);
+
+      const [, args] = supabase.rpcMock.mock.calls[0];
+      expect(args.p_rows).toHaveLength(1);
+      // Deterministic tie-break: the lowest id wins ("aaaa..." < "bbbb...").
+      expect(args.p_rows[0].opportunity_source_id).toBe(rowA.id);
+    });
+
+    it("does NOT collapse rows with different title, company, or location — matches each independently", async () => {
+      const differentTitle = { ...UNENRICHED_OPPORTUNITY_ROW, id: "cccccccc-0000-0000-0000-000000000001", title: "Frontend Engineering Intern" };
+      const differentCompany = { ...UNENRICHED_OPPORTUNITY_ROW, id: "cccccccc-0000-0000-0000-000000000002", company: "Globex" };
+      const differentLocation = { ...UNENRICHED_OPPORTUNITY_ROW, id: "cccccccc-0000-0000-0000-000000000003", location: "Remote" };
+      const original = { ...UNENRICHED_OPPORTUNITY_ROW, id: "cccccccc-0000-0000-0000-000000000000" };
+
+      const supabase = mockSupabase({
+        tableResults: {
+          skill: { data: [{ name: "python" }], error: null },
+          opportunity_source: { data: [original, differentTitle, differentCompany, differentLocation], error: null },
+        },
+      });
+
+      const summary = await runMatchingForCandidate(supabase, CANDIDATE_ID);
+
+      // All four are genuinely distinct dedup keys — none collapse.
+      expect(summary.opportunitiesEvaluated).toBe(4);
+      expect(summary.insertedOrUpdated).toBe(4);
+    });
+
+    it("self-heals when the representative expires: the remaining active duplicate becomes representative on the next run, with no code change to A3.2's expiry logic", async () => {
+      const representative = { ...UNENRICHED_OPPORTUNITY_ROW, id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" };
+      const duplicate = { ...UNENRICHED_OPPORTUNITY_ROW, id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" };
+
+      // Run 1: both active — representative (lowest id) is matched.
+      const supabaseRun1 = mockSupabase({
+        tableResults: {
+          skill: { data: [{ name: "python" }], error: null },
+          opportunity_source: { data: [representative, duplicate], error: null },
+        },
+      });
+      const summary1 = await runMatchingForCandidate(supabaseRun1, CANDIDATE_ID);
+      expect(summary1.opportunitiesEvaluated).toBe(1);
+      expect(supabaseRun1.rpcMock.mock.calls[0][1].p_rows[0].opportunity_source_id).toBe(representative.id);
+
+      // Run 2: A3.2's expiry sweep (unchanged, not called from here) has
+      // since set the representative's status to 'expired' — this
+      // module's own status = 'active' filter means it's simply no
+      // longer returned at all. Only the duplicate is now active.
+      const supabaseRun2 = mockSupabase({
+        tableResults: {
+          skill: { data: [{ name: "python" }], error: null },
+          opportunity_source: { data: [duplicate], error: null },
+        },
+      });
+      const summary2 = await runMatchingForCandidate(supabaseRun2, CANDIDATE_ID);
+
+      expect(summary2.opportunitiesEvaluated).toBe(1);
+      expect(supabaseRun2.rpcMock.mock.calls[0][1].p_rows[0].opportunity_source_id).toBe(duplicate.id);
+    });
+
+    it("Gate R2: dedup grouping applies the same way to a resume-scoped pass", async () => {
+      const rowA = { ...UNENRICHED_OPPORTUNITY_ROW, id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" };
+      const rowB = { ...UNENRICHED_OPPORTUNITY_ROW, id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" };
+
+      const supabase = mockSupabase({
+        tableResults: { opportunity_source: { data: [rowA, rowB], error: null } },
+        resumeSkillNames: ["python"],
+      });
+
+      const summary = await runMatchingForCandidate(supabase, CANDIDATE_ID, RESUME_ID);
+
+      expect(summary.resumeId).toBe(RESUME_ID);
+      expect(summary.opportunitiesEvaluated).toBe(1);
+      const [, args] = supabase.rpcMock.mock.calls[0];
+      expect(args.p_rows).toHaveLength(1);
+      expect(args.p_rows[0].opportunity_source_id).toBe(rowA.id);
+    });
   });
 });
