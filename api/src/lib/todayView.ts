@@ -20,8 +20,23 @@
 // place a candidate actually acts on a match. Closes the gap the original
 // audit flagged: before this, Today and Feed were two disconnected
 // surfaces with no link between them.
+//
+// daily_queue (Phase B2): additive field, built from B1's UNMODIFIED
+// buildDailyQueue() (lib/dailyQueue.ts) using this same function's own
+// freshly-computed `actionRequired` list plus the caller's raw
+// candidate-scoped opportunity_match/opportunity_source rows (matches/
+// sources below — the same flat, resume_id-IS-NULL-scoped rows the route
+// already fetches for feedItems/feed_summary, never a second query).
+// Deliberately computed here rather than in the route: this keeps the
+// "what does Today look like" decision entirely inside the one pure,
+// unit-tested view function, consistent with how feed_summary/
+// resume_highlights are already handled, and the route stays a thin
+// fetch-and-call wrapper (see today.ts's own header comment on that
+// discipline). buildDailyQueue() itself is untouched — this file only
+// supplies its inputs and threads its output through.
 
-import type { OpportunityFeedItem } from "./opportunityFeed.js";
+import type { OpportunityFeedItem, OpportunityMatchRow, OpportunitySourceRow } from "./opportunityFeed.js";
+import { buildDailyQueue, type DailyQueueItem } from "./dailyQueue.js";
 
 export interface ApplicationRow {
   id: string;
@@ -78,6 +93,18 @@ export interface TodayViewInput {
   // personalized. Null when there is no visible opportunity_source data
   // yet (e.g. ingestion has never run).
   lastIngestedAt?: string | null;
+  // Phase B2 — optional, defaults to []. The SAME raw candidate-level
+  // (resume_id IS NULL) opportunity_match rows the caller already fetched
+  // to build `feedItems` above (see today.ts) — passed here in their raw
+  // form, not pre-joined, because buildDailyQueue() (lib/dailyQueue.ts)
+  // runs its own internal buildOpportunityFeed() call to get A3.1/A3.2/
+  // A3.3 filtering for free. A caller that omits this (or a test that
+  // doesn't care about daily_queue) simply gets an empty queue from the
+  // opportunity side — action_required items can still populate it.
+  dailyQueueMatches?: OpportunityMatchRow[];
+  // Phase B2 — optional, defaults to []. Same active opportunity_source
+  // rows already fetched for feedItems above — see dailyQueueMatches.
+  dailyQueueSources?: OpportunitySourceRow[];
   /** Caller's current date/time. Injected (not `new Date()` internally) so tests are deterministic. */
   now: Date;
 }
@@ -197,6 +224,12 @@ export interface TodayView {
   recently_applied: TodayRecentlyApplied[];
   pipeline_summary: Record<string, number>;
   feed_summary: TodayFeedSummary;
+  // Phase B2 — additive field, never null/omitted: [] when there is
+  // nothing eligible (see buildDailyQueue()'s own contract). Built from
+  // this function's own actionRequired plus dailyQueueMatches/
+  // dailyQueueSources above; see this file's header comment for why it's
+  // computed here rather than in the route.
+  daily_queue: DailyQueueItem[];
   stats: {
     total_applications: number;
     active_applications: number;
@@ -273,6 +306,8 @@ export function buildTodayView({
   feedItems = [],
   resumeFeedGroups = [],
   lastIngestedAt = null,
+  dailyQueueMatches = [],
+  dailyQueueSources = [],
   now,
 }: TodayViewInput): TodayView {
   const today = toDateOnly(now);
@@ -386,6 +421,17 @@ export function buildTodayView({
   followUpsDue.sort((a, b) => a.days_until_due - b.days_until_due);
   recentlyApplied.sort((a, b) => (a.applied_at < b.applied_at ? 1 : -1));
 
+  // Phase B2: built from THIS function's own actionRequired (already
+  // computed above, same list the response's action_required field
+  // returns) plus the raw candidate-level match/source rows the caller
+  // passed in. buildDailyQueue() is called exactly as B1 shipped it — no
+  // wrapping, no re-implementation of its filtering/ordering/cap.
+  const dailyQueue = buildDailyQueue({
+    actionRequired,
+    matches: dailyQueueMatches,
+    sources: dailyQueueSources,
+  });
+
   return {
     generated_at: now.toISOString(),
     action_required: actionRequired,
@@ -395,6 +441,7 @@ export function buildTodayView({
     recently_applied: recentlyApplied,
     pipeline_summary: pipelineSummary,
     feed_summary: summarizeFeedForToday(feedItems, lastIngestedAt, resumeFeedGroups),
+    daily_queue: dailyQueue,
     stats: {
       total_applications: applications.length,
       active_applications: activeApplications,

@@ -184,6 +184,16 @@ export function todayRouter(): Router {
       feedItems: buildOpportunityFeed(matches, sources),
       resumeFeedGroups,
       lastIngestedAt,
+      // Phase B2 — daily_queue: the SAME raw candidate-level (resume_id
+      // IS NULL) matches and active sources already fetched above for
+      // feedItems, passed through unchanged. buildTodayView() hands these
+      // to buildDailyQueue() (lib/dailyQueue.ts, unmodified from B1),
+      // which runs its own internal buildOpportunityFeed() call — no
+      // second query, no second candidate-resolution mechanism; `candidate.id`
+      // above (from req.supabase, RLS-scoped) is the only identity used
+      // anywhere in this route.
+      dailyQueueMatches: matches,
+      dailyQueueSources: sources,
       now: new Date(),
     });
 

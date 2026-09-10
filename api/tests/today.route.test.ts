@@ -448,3 +448,232 @@ describe("GET /today — feed_summary wiring", () => {
     expect(body.feed_summary.new_matches_count).toBe(1); // unchanged from the pre-Gate-R3 baseline test above
   });
 });
+
+// ── Phase B2 — daily_queue wiring ─────────────────────────────────────
+//
+// B2 is purely additive: buildDailyQueue() (lib/dailyQueue.ts) itself is
+// already fully unit-tested (tests/dailyQueue.test.ts) against every
+// membership/ordering/cap/dedup rule. These tests only prove the
+// integration boundary — that GET /today actually threads the caller's
+// own action_required + candidate-scoped opportunity_match/
+// opportunity_source rows into that unmodified function and returns the
+// result as an additive `daily_queue` field — not a re-test of the
+// algorithm itself.
+describe("GET /today — daily_queue (Phase B2)", () => {
+  it("daily_queue is present and is an array on a normal authenticated response", async () => {
+    const supabase = makeSupabaseMock();
+    const req = { supabase } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("get", "/today"), req, res);
+
+    expect(res.status).toHaveBeenCalledWith(200);
+    const body = res.body as { daily_queue: unknown };
+    expect(Array.isArray(body.daily_queue)).toBe(true);
+  });
+
+  it("includes an action-required item (a follow-up overdue by construction, regardless of when the suite runs)", async () => {
+    const supabase = makeSupabaseMock({
+      applications: {
+        data: [
+          {
+            id: "app-follow-up",
+            opportunity_id: "opp-follow-up",
+            status: "APPLIED",
+            applied_at: null,
+            deadline_override: null,
+            // Far enough in the past that it is always overdue, independent
+            // of the actual date the test suite runs on.
+            next_action_date: "2000-01-01",
+            next_action_note: "Call recruiter",
+            updated_at: "2000-01-01T00:00:00Z",
+          },
+        ],
+        error: null,
+      },
+      opportunities: {
+        data: [
+          {
+            id: "opp-follow-up",
+            title: "Platform Intern",
+            company: "Gamma LLC",
+            application_url: null,
+            deadline_date: null,
+            inbox_status: "new",
+            is_priority: false,
+          },
+        ],
+        error: null,
+      },
+      matches: { data: [], error: null }, // isolate: no opportunity-match items in this case
+    });
+    const req = { supabase } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("get", "/today"), req, res);
+
+    expect(res.status).toHaveBeenCalledWith(200);
+    const body = res.body as {
+      action_required: Array<{ application_id: string }>;
+      daily_queue: Array<{ reason: string; id: string }>;
+    };
+    // Sanity: this fixture really does produce an action_required item —
+    // otherwise this test would trivially pass for the wrong reason.
+    expect(body.action_required.some((a) => a.application_id === "app-follow-up")).toBe(true);
+    expect(body.daily_queue).toContainEqual(expect.objectContaining({ reason: "action_required", id: "app-follow-up" }));
+  });
+
+  it("includes an eligible, untriaged opportunity match (the default NEW_MATCH_ROW/ACTIVE_SOURCE_ROW fixture)", async () => {
+    const supabase = makeSupabaseMock({
+      applications: { data: [], error: null },
+      opportunities: { data: [], error: null },
+    });
+    const req = { supabase } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("get", "/today"), req, res);
+
+    expect(res.status).toHaveBeenCalledWith(200);
+    const body = res.body as { daily_queue: Array<{ reason: string; id: string }> };
+    expect(body.daily_queue).toContainEqual(expect.objectContaining({ reason: "match", id: "match-1" }));
+  });
+
+  it("caps daily_queue at 5 items even when more than 5 are eligible", async () => {
+    const manyMatches = Array.from({ length: 8 }, (_, i) => ({
+      id: `match-${i}`,
+      opportunity_source_id: `source-${i}`,
+      match_score: 10 + i,
+      eligibility_status: "eligible",
+      match_breakdown: {},
+      inbox_status: "new",
+      is_priority: false,
+      promoted_opportunity_id: null,
+    }));
+    const manySources = Array.from({ length: 8 }, (_, i) => ({
+      ...ACTIVE_SOURCE_ROW,
+      id: `source-${i}`,
+      title: `Role ${i}`,
+      company: `Company ${i}`,
+    }));
+    const supabase = makeSupabaseMock({
+      applications: { data: [], error: null },
+      opportunities: { data: [], error: null },
+      matches: { data: manyMatches, error: null },
+      sources: { data: manySources, error: null },
+    });
+    const req = { supabase } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("get", "/today"), req, res);
+
+    expect(res.status).toHaveBeenCalledWith(200);
+    const body = res.body as { daily_queue: unknown[] };
+    expect(body.daily_queue).toHaveLength(5);
+  });
+
+  it("existing Today fields (stats, action_required, deadlines_approaching, feed_summary, pipeline_summary, generated_at) are untouched by daily_queue", async () => {
+    const supabase = makeSupabaseMock();
+    const req = { supabase } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("get", "/today"), req, res);
+
+    expect(res.status).toHaveBeenCalledWith(200);
+    const body = res.body as Record<string, unknown>;
+    for (const field of [
+      "generated_at",
+      "action_required",
+      "deadlines_approaching",
+      "follow_ups_due",
+      "saved_opportunities",
+      "recently_applied",
+      "pipeline_summary",
+      "feed_summary",
+      "stats",
+      "daily_queue",
+    ]) {
+      expect(body).toHaveProperty(field);
+    }
+    // Same feed_summary behavior as the pre-B2 baseline test above —
+    // daily_queue is additive, it does not change this shape.
+    const feedSummary = body.feed_summary as { new_matches_count: number };
+    expect(feedSummary.new_matches_count).toBe(1);
+  });
+
+  it("returns daily_queue: [] (never null/omitted) for a candidate with nothing eligible", async () => {
+    const supabase = makeSupabaseMock({
+      applications: { data: [], error: null },
+      opportunities: { data: [], error: null },
+      matches: { data: [], error: null },
+    });
+    const req = { supabase } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("get", "/today"), req, res);
+
+    expect(res.status).toHaveBeenCalledWith(200);
+    const body = res.body as { daily_queue: unknown[] };
+    expect(body.daily_queue).toEqual([]);
+  });
+
+  it("candidate isolation: the opportunity_match query feeding daily_queue is scoped to THIS request's own resolved candidate id, via the same candidate_id filter used everywhere else on this route — no second identity mechanism", async () => {
+    const eqSpy = vi.fn();
+
+    function supabaseFor(candidateId: string) {
+      return {
+        from: (table: string) => {
+          if (table === "candidate") return { select: () => ({ single: async () => ({ data: { id: candidateId }, error: null }) }) };
+          if (table === "application") return { select: () => queryResult([], null) };
+          if (table === "opportunity") return { select: () => queryResult([], null) };
+          if (table === "resume") return { select: () => queryResult([], null) };
+          if (table === "opportunity_match") {
+            return {
+              select: (cols: string) => {
+                if (cols.includes("resume_id")) return queryResult([], null);
+                const qr = queryResult([NEW_MATCH_ROW], null);
+                const originalEq = qr.eq as (...args: unknown[]) => unknown;
+                qr.eq = (...args: unknown[]) => {
+                  eqSpy(candidateId, ...args);
+                  return originalEq(...args);
+                };
+                return qr;
+              },
+            };
+          }
+          if (table === "opportunity_source") {
+            return {
+              select: (cols: string) =>
+                cols === "last_seen_at"
+                  ? queryResult([{ last_seen_at: "2026-08-29T09:00:00Z" }], null)
+                  : queryResult([ACTIVE_SOURCE_ROW], null),
+            };
+          }
+          return queryResult([], null);
+        },
+      };
+    }
+
+    const reqA = { supabase: supabaseFor("cand-A") } as unknown as AuthedRequest;
+    const resA = makeRes();
+    await runRoute(getHandlers("get", "/today"), reqA, resA);
+
+    const reqB = { supabase: supabaseFor("cand-B") } as unknown as AuthedRequest;
+    const resB = makeRes();
+    await runRoute(getHandlers("get", "/today"), reqB, resB);
+
+    // Each request's opportunity_match query (the same one that feeds both
+    // feed_summary and daily_queue) was filtered by that SAME request's own
+    // resolved candidate id — never the other request's.
+    expect(eqSpy).toHaveBeenCalledWith("cand-A", "candidate_id", "cand-A");
+    expect(eqSpy).toHaveBeenCalledWith("cand-B", "candidate_id", "cand-B");
+    expect(eqSpy).not.toHaveBeenCalledWith("cand-A", "candidate_id", "cand-B");
+    expect(eqSpy).not.toHaveBeenCalledWith("cand-B", "candidate_id", "cand-A");
+
+    // And both responses' daily_queue reflect only their own request's data
+    // (both happen to see the same mock match row here, but each was
+    // produced from that request's own independently-scoped fetch, not a
+    // shared/leaked one).
+    expect((resA.body as { daily_queue: unknown[] }).daily_queue.length).toBeGreaterThan(0);
+    expect((resB.body as { daily_queue: unknown[] }).daily_queue.length).toBeGreaterThan(0);
+  });
+});

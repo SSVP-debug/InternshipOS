@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { buildTodayView, type ApplicationRow, type OpportunityRow } from "../src/lib/todayView.js";
-import type { OpportunityFeedItem } from "../src/lib/opportunityFeed.js";
+import type { OpportunityFeedItem, OpportunityMatchRow, OpportunitySourceRow } from "../src/lib/opportunityFeed.js";
 
 const NOW = new Date("2026-02-10T12:00:00Z"); // fixed "today" = 2026-02-10
 
@@ -453,5 +453,139 @@ describe("buildTodayView — feed_summary", () => {
       ["resume-a", 1],
       ["resume-b", 2],
     ]);
+  });
+});
+
+// ── Phase B2 — daily_queue wiring ─────────────────────────────────────
+//
+// buildDailyQueue() itself (lib/dailyQueue.ts) is fully covered by
+// tests/dailyQueue.test.ts — these only confirm buildTodayView() (this
+// file's own subject) threads its own actionRequired list and the
+// caller's raw dailyQueueMatches/dailyQueueSources into it correctly,
+// and that daily_queue is additive (never disturbs any existing field).
+describe("buildTodayView — daily_queue", () => {
+  function matchRow(overrides: Partial<OpportunityMatchRow> & { id: string }): OpportunityMatchRow {
+    return {
+      opportunity_source_id: "source-1",
+      match_score: 50,
+      eligibility_status: "unknown",
+      match_breakdown: {},
+      inbox_status: "new",
+      is_priority: false,
+      promoted_opportunity_id: null,
+      ...overrides,
+    };
+  }
+
+  function sourceRow(overrides: Partial<OpportunitySourceRow> & { id: string }): OpportunitySourceRow {
+    return {
+      title: "Backend Engineering Intern",
+      company: "Nimbus Labs",
+      location: "Remote",
+      work_mode: "remote",
+      employment_type: "internship",
+      posted_date: "2026-02-01",
+      application_url: "https://example.com/apply",
+      status: "active",
+      ...overrides,
+    };
+  }
+
+  it("defaults to an empty daily_queue when dailyQueueMatches/dailyQueueSources are omitted entirely", () => {
+    const view = buildTodayView({ applications: [], opportunities: [], now: NOW });
+    expect(view.daily_queue).toEqual([]);
+  });
+
+  it("surfaces this view's own action_required items in daily_queue (same list, not a re-derivation)", () => {
+    const opportunities = [
+      { id: "o1", title: "Data Intern", company: "Beta Inc", application_url: null, deadline_date: "2026-02-11", inbox_status: "new" as const, is_priority: false },
+    ];
+    const applications = [
+      { id: "a1", opportunity_id: "o1", status: "SAVED", applied_at: null, deadline_override: null, next_action_date: null, next_action_note: null, updated_at: NOW.toISOString() },
+    ];
+    const view = buildTodayView({ applications, opportunities, now: NOW });
+
+    expect(view.action_required).toHaveLength(1);
+    expect(view.daily_queue).toContainEqual(
+      expect.objectContaining({ reason: "action_required", id: "a1", action: view.action_required[0] }),
+    );
+  });
+
+  it("surfaces an eligible, untriaged opportunity match from dailyQueueMatches/dailyQueueSources", () => {
+    const view = buildTodayView({
+      applications: [],
+      opportunities: [],
+      dailyQueueMatches: [matchRow({ id: "m1", match_score: 75 })],
+      dailyQueueSources: [sourceRow({ id: "source-1" })],
+      now: NOW,
+    });
+
+    expect(view.daily_queue).toHaveLength(1);
+    expect(view.daily_queue[0]).toEqual(
+      expect.objectContaining({ reason: "match", id: "m1" }),
+    );
+  });
+
+  it("does not let daily_queue affect any other existing field (additive only)", () => {
+    const opportunities = [
+      { id: "o1", title: "Data Intern", company: "Beta Inc", application_url: null, deadline_date: "2026-02-20", inbox_status: "new" as const, is_priority: false },
+    ];
+    const applications = [
+      { id: "a1", opportunity_id: "o1", status: "SAVED", applied_at: null, deadline_override: null, next_action_date: null, next_action_note: null, updated_at: NOW.toISOString() },
+    ];
+    const feedItems = [
+      { opportunity_match_id: "fm1", opportunity_source_id: "s1", title: "Frontend Intern", company: "Zed Co", location: null, work_mode: null, employment_type: "internship", posted_date: null, application_url: null, match_score: 60, eligibility_status: "unknown" as const, match_reasons: [], match_missing: [], match_unknown: [], inbox_status: "new" as const, is_priority: false, promoted_opportunity_id: null, duplicate_source_count: 0 },
+    ];
+
+    const withoutQueueInputs = buildTodayView({ applications, opportunities, feedItems, now: NOW });
+    const withQueueInputs = buildTodayView({
+      applications,
+      opportunities,
+      feedItems,
+      dailyQueueMatches: [matchRow({ id: "m1" })],
+      dailyQueueSources: [sourceRow({ id: "source-1" })],
+      now: NOW,
+    });
+
+    // Every field except daily_queue itself must be identical.
+    const { daily_queue: _a, ...restWithout } = withoutQueueInputs;
+    const { daily_queue: _b, ...restWith } = withQueueInputs;
+    expect(restWith).toEqual(restWithout);
+    expect(withoutQueueInputs.daily_queue).toEqual([]);
+    expect(withQueueInputs.daily_queue).toHaveLength(1);
+  });
+
+  it("caps daily_queue at 5 even when this view's own action_required plus matches exceed it", () => {
+    const applications = Array.from({ length: 3 }, (_, i) => ({
+      id: `a${i}`,
+      opportunity_id: `o${i}`,
+      status: "APPLIED",
+      applied_at: null,
+      deadline_override: null,
+      next_action_date: "2000-01-01", // always overdue, deterministic regardless of NOW
+      next_action_note: "follow up",
+      updated_at: NOW.toISOString(),
+    }));
+    const opportunities = Array.from({ length: 3 }, (_, i) => ({
+      id: `o${i}`,
+      title: `Role ${i}`,
+      company: `Co ${i}`,
+      application_url: null,
+      deadline_date: null,
+      inbox_status: "new" as const,
+      is_priority: false,
+    }));
+    const matches = Array.from({ length: 4 }, (_, i) => matchRow({ id: `m${i}`, opportunity_source_id: `s${i}`, match_score: 10 + i }));
+    const sources = Array.from({ length: 4 }, (_, i) => sourceRow({ id: `s${i}`, title: `Match ${i}`, company: `MCo ${i}` }));
+
+    const view = buildTodayView({
+      applications,
+      opportunities,
+      dailyQueueMatches: matches,
+      dailyQueueSources: sources,
+      now: NOW,
+    });
+
+    expect(view.daily_queue).toHaveLength(5);
   });
 });
