@@ -571,8 +571,16 @@ export interface TodayFeedSummary {
 // the frontend renders as-is (see pages/today.ts's "What should I do
 // next?" section). No client-side re-ranking/re-filtering is performed;
 // the backend order and membership are authoritative.
+//
+// Phase B5 adds the "opportunity_deadline" variant: an opportunity the
+// candidate hasn't applied to yet, whose own source deadline is close
+// (see dailyQueue.ts's OPPORTUNITY_DEADLINE_URGENCY_DAYS). Carries the
+// same `opportunity` payload as "match" (so the exact same Save/Dismiss/
+// Priority/Start-application actions apply), plus days_until_deadline so
+// the frontend doesn't have to re-derive it from opportunity.deadline_date.
 export type DailyQueueItem =
   | { reason: "action_required"; id: string; action: TodayActionItem }
+  | { reason: "opportunity_deadline"; id: string; opportunity: OpportunityFeedItem; days_until_deadline: number }
   | { reason: "match"; id: string; opportunity: OpportunityFeedItem };
 export interface TodayView {
   generated_at: string;
@@ -672,6 +680,11 @@ export interface OpportunityFeedItem {
   // See api's opportunityFeed.ts (collapseDuplicateSources) for how
   // conservative this detection is.
   duplicate_source_count: number;
+  // Phase B5 — the posting's own stated deadline, straight from
+  // opportunity_source.deadline_date. null when the source has no stated
+  // deadline. Used by lib/dailyQueue.ts (frontend) to render the
+  // "opportunity_deadline" queue reason; not otherwise interpreted here.
+  deadline_date: string | null;
 }
 // Gate R3: a lightweight per-active-resume summary, always present
 // (empty array for a candidate with no active resumes) — see

@@ -115,7 +115,7 @@ export async function renderToday(root: HTMLElement) {
 
     const card = h("div", { class: "card" }, []);
     (dailyQueue as DailyQueueItem[]).forEach((item, i) => {
-      const row = item.reason === "action_required" ? actionStub(item.action) : renderQueueMatchItem(item);
+      const row = item.reason === "action_required" ? actionStub(item.action) : renderQueueOpportunityItem(item);
       if (i > 0) row.style.borderTop = "1px solid var(--border, #e5e5e5)";
       card.append(row);
     });
@@ -123,8 +123,11 @@ export async function renderToday(root: HTMLElement) {
     return elements;
   }
 
-  function renderQueueMatchItem(item: Extract<DailyQueueItem, { reason: "match" }>): HTMLElement {
+  function renderQueueOpportunityItem(
+    item: Extract<DailyQueueItem, { reason: "match" }> | Extract<DailyQueueItem, { reason: "opportunity_deadline" }>,
+  ): HTMLElement {
     const opportunity = item.opportunity;
+    const isUrgentDeadline = item.reason === "opportunity_deadline";
 
     async function updateInbox(data: { inbox_status?: OpportunityFeedItem["inbox_status"]; is_priority?: boolean }) {
       try {
@@ -179,16 +182,27 @@ export async function renderToday(root: HTMLElement) {
       }
     }
 
-    return h("div", { class: "stub" }, [
+    return h("div", { class: `stub ${isUrgentDeadline ? "stub--urgent" : ""}`.trim() }, [
+      // Phase B5: same "days-until" tab used for action_required items
+      // (actionStub above), only shown when this item's own inclusion
+      // reason IS the deadline — an ordinary "match" item has no
+      // due-date concept at all, so it gets no due column.
+      isUrgentDeadline
+        ? h("div", { class: "stub__due" }, [relativeDays((item as Extract<DailyQueueItem, { reason: "opportunity_deadline" }>).days_until_deadline)])
+        : null,
       h("div", { class: "stub__body" }, [
         h("div", { class: "stub__title" }, [
           opportunity.is_priority ? h("span", { class: "star" }, ["★ "]) : "",
           opportunity.title,
           " ",
-          h("span", { class: "pill pill--new" }, ["New match"]),
+          isUrgentDeadline
+            ? h("span", { class: "pill pill--deadline" }, ["Deadline approaching"])
+            : h("span", { class: "pill pill--new" }, ["New match"]),
         ]),
         h("div", { class: "stub__meta" }, [
-          `${formatMatchMeta(opportunity)} · Match ${Math.round(opportunity.match_score)}/100`,
+          `${formatMatchMeta(opportunity)}${
+            isUrgentDeadline && opportunity.deadline_date ? ` · Deadline ${formatDate(opportunity.deadline_date)}` : ""
+          } · Match ${Math.round(opportunity.match_score)}/100`,
         ]),
       ]),
       h("div", { class: "stub__actions" }, [

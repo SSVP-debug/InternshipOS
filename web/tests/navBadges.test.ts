@@ -38,6 +38,7 @@ function feedItem(id: string, overrides: Partial<OpportunityFeedItem> = {}): Opp
     is_priority: false,
     promoted_opportunity_id: null,
     duplicate_source_count: 0,
+    deadline_date: null,
     ...overrides,
   };
 }

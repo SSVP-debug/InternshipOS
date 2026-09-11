@@ -41,9 +41,19 @@ function matchQueueItem(id: string, overrides: Partial<OpportunityFeedItem> = {}
       is_priority: false,
       promoted_opportunity_id: null,
       duplicate_source_count: 0,
+      deadline_date: null,
       ...overrides,
     },
   };
+}
+
+function deadlineQueueItem(
+  id: string,
+  daysUntilDeadline: number,
+  overrides: Partial<OpportunityFeedItem> = {},
+): Extract<DailyQueueItem, { reason: "opportunity_deadline" }> {
+  const match = matchQueueItem(id, { deadline_date: "2026-02-12", ...overrides });
+  return { reason: "opportunity_deadline", id, opportunity: match.opportunity, days_until_deadline: daysUntilDeadline };
 }
 
 describe("classifyDailyQueueState", () => {
@@ -77,15 +87,34 @@ describe("dailyQueueItemKey", () => {
     expect(dailyQueueItemKey(matchQueueItem("m1"))).toBe("match:m1");
   });
 
-  it("never collides between the two reasons even with the same underlying id", () => {
-    expect(dailyQueueItemKey(actionQueueItem("x"))).not.toBe(dailyQueueItemKey(matchQueueItem("x")));
+  it("produces a distinct key for an opportunity_deadline item (Phase B5)", () => {
+    expect(dailyQueueItemKey(deadlineQueueItem("m1", 2))).toBe("opportunity_deadline:m1");
+  });
+
+  it("never collides between any of the three reasons even with the same underlying id", () => {
+    const keys = new Set([
+      dailyQueueItemKey(actionQueueItem("x")),
+      dailyQueueItemKey(matchQueueItem("x")),
+      dailyQueueItemKey(deadlineQueueItem("x", 1)),
+    ]);
+    expect(keys.size).toBe(3);
   });
 });
 
 describe("dailyQueueItemKey — order preservation", () => {
   it("mapping over the API-provided array preserves its order (no client-side re-sort)", () => {
-    const items: DailyQueueItem[] = [matchQueueItem("m2"), actionQueueItem("a1"), matchQueueItem("m1")];
-    expect(items.map(dailyQueueItemKey)).toEqual(["match:m2", "action_required:a1", "match:m1"]);
+    const items: DailyQueueItem[] = [
+      deadlineQueueItem("m3", 1),
+      matchQueueItem("m2"),
+      actionQueueItem("a1"),
+      matchQueueItem("m1"),
+    ];
+    expect(items.map(dailyQueueItemKey)).toEqual([
+      "opportunity_deadline:m3",
+      "match:m2",
+      "action_required:a1",
+      "match:m1",
+    ]);
   });
 });
 
@@ -99,5 +128,11 @@ describe("formatMatchMeta", () => {
   it("skips null location/work_mode without leaving stray separators", () => {
     const opp = matchQueueItem("m1", { location: null, work_mode: null }).opportunity;
     expect(formatMatchMeta(opp)).toBe("Nimbus Labs · internship");
+  });
+
+  it("works the same for an opportunity_deadline item's payload (Phase B5) — same function, no special-casing", () => {
+    expect(formatMatchMeta(deadlineQueueItem("m1", 2).opportunity)).toBe(
+      "Nimbus Labs · Bengaluru, India · remote · internship",
+    );
   });
 });

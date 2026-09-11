@@ -1,77 +1,90 @@
-# InternshipOS — Phase B follow-up: Nav Badge Polish (P2)
+# InternshipOS — Phase B5: Deadline-Aware Urgency for Unapplied Opportunities
 
 ## What this is
 
-A small, optional follow-up to Phase B (flagged as P2 in the original
-Phase B audit — "cheap and low-priority, cut if time-constrained").
-Frontend-only. Drop into the matching paths and merge.
+Every file this round touched or depends on, at its current full state
+(this drop supersedes the B1–B4 drops for these files). Drop into the
+matching paths and merge.
 
 ```
-web/src/lib/navBadges.ts         (new)
-web/src/pages/today.ts           (modified — now includes both the
-                                   Phase B3 Daily Queue section AND this
-                                   round's badge wiring; this is the full
-                                   current file, supersedes the B3 drop)
-web/src/pages/opportunityFeed.ts (modified — badge wiring only)
-web/tests/navBadges.test.ts      (new)
+api/src/lib/dailyQueue.ts                  (modified — new opportunity_deadline reason)
+api/src/lib/opportunityFeed.ts             (modified — deadline_date field, additive)
+api/src/lib/todayView.ts                   (modified — exported date helpers + named threshold, now passed to buildDailyQueue)
+api/src/routes/opportunity-feed.ts         (modified — deadline_date now selected)
+api/src/routes/today.ts                    (unchanged this round — included for completeness)
+api/tests/dailyQueue.test.ts               (rewritten — +9 Phase B5 tests)
+api/tests/opportunityFeed.test.ts          (modified — +1 deadline_date passthrough test)
+api/tests/opportunity-feed.route.test.ts   (modified — +1 route-level deadline_date test)
+api/tests/today.route.test.ts              (unchanged this round — included for completeness)
+api/tests/todayView.test.ts                (modified — +1 opportunity_deadline integration test)
+
+web/src/lib/api.ts                         (modified — deadline_date + opportunity_deadline type)
+web/src/lib/dailyQueue.ts                  (unchanged this round — included for completeness)
+web/src/lib/navBadges.ts                   (unchanged this round — included for completeness)
+web/src/pages/today.ts                     (modified — renders opportunity_deadline items)
+web/src/pages/opportunityFeed.ts           (unchanged this round — included for completeness)
+web/src/style.css                          (modified — one new pill modifier, reused color tokens)
+web/tests/dailyQueue.test.ts               (modified — +2 opportunity_deadline coverage)
+web/tests/navBadges.test.ts                (modified — fixture fix for the new required field)
 ```
 
 ## What changed
 
-`shell.ts`'s `renderShell()` has always accepted an optional `badges`
-param, but every call site passed the default `{}` — no sidebar nav item
-ever showed a count. This gate wires two of them up:
+An opportunity the candidate has **not yet applied to** now gets pulled
+into the Daily Queue as urgent when its own `opportunity_source.deadline_date`
+is close — closing the gap the original Phase B audit flagged (P1, item 3)
+and B1 explicitly deferred as "B5."
 
-- **Today** nav link now shows a badge = the live Daily Queue length
-  (`todayBadgeCount`), re-computed on every `draw()` so it stays in sync
-  as queue items are actioned (saved/dismissed/applied).
-- **Feed** nav link now shows a badge = the count of untriaged,
-  not-yet-promoted, non-ineligible matches (`feedBadgeCount`) — the
-  *exact same definition* `api/src/lib/todayView.ts`'s `summarizeItems()`
-  already uses for `feed_summary.new_matches_count`, reproduced on the
-  frontend (not re-derived differently) only because the Feed page's own
-  fetch returns raw items, not that precomputed count.
-- A badge is **absent** (not shown as "0", not stale) whenever its count
-  isn't known — e.g. Today's badge doesn't appear while browsing Feed,
-  since that would require fetching Today's own data from a page that
-  isn't Today. No new API calls, no cross-page shared state.
-- `0` is never rendered as a badge (`shell.ts`'s existing
-  `badgeCount ? ... : null` already treated 0 as falsy/hidden) — kept
-  as-is.
+- **New membership rule** (`lib/dailyQueue.ts`): an already-eligible
+  (untriaged, unapplied, active) match becomes `opportunity_deadline`
+  instead of `match` when its deadline is `0 ≤ days_until_deadline ≤ 3`
+  — the exact same `3`-day threshold `action_required` already uses for
+  application deadlines (`ACTION_REQUIRED_DEADLINE_DAYS`, exported from
+  `todayView.ts`, not a new number).
+- **Past-due deadlines are excluded, not flagged urgent** — an unapplied
+  opportunity whose deadline already passed is simply moot; it stays a
+  plain `match`, never `opportunity_deadline`.
+- **Merged urgency tier** — `opportunity_deadline` items are sorted
+  together with `action_required` items by days-until (not a separate,
+  lower-priority tier below them).
+- **No schema/migration change** — `opportunity_source.deadline_date`
+  already existed; this only starts selecting it
+  (`OPPORTUNITY_SOURCE_COLUMNS`) and passing it through display types.
+- **Frontend**: Today renders `opportunity_deadline` items with the same
+  urgent-border/due-date-tab treatment as `action_required` items, a new
+  "Deadline approaching" pill, and the exact same Save/Dismiss/Priority/
+  Start-application actions as an ordinary `match` — no new action type.
 
 ## What did NOT change
 
-- No backend changes at all — confirmed via `git diff --stat` that only
-  `web/` files changed this round.
-- No new API fields, no new endpoints.
-- No changes to `api/src/lib/dailyQueue.ts`, matching/scoring/expiry
-  logic, or Feed ranking.
-- No new nav items, no redesign of the sidebar — only badges on two
-  existing links, using the CSS class (`.nav__badge`) that was already
-  defined in `style.css` but unused until now.
+- No migration.
+- `matchEngine.ts`, `skillNormalization.ts`, `dedupFingerprint.ts`,
+  `expireStaleOpportunities.ts` — confirmed empty diff via
+  `git diff --stat` against each before packaging.
+- A3.1 score floor / A3.2 expiry / A3.3 dedup — reused unmodified via
+  `buildOpportunityFeed()`, not re-implemented.
+- No new endpoint, no persistence, no new application states, no
+  auto-apply.
 
 ## Validation performed before this drop
 
-- `web/tests/navBadges.test.ts` — **5/5 passed**.
-- Full frontend suite: `npx vitest run` (web) — **52/52 passed** (47
-  pre-existing + 5 new), zero regressions.
-- Frontend typecheck: `tsconfig.json` and `tsconfig.tests.json` — both
-  clean.
-- Frontend production build: `npm run build` — succeeded (69 modules, no
-  errors).
-- Backend full suite (safety check, no backend files changed):
-  **701/701 passed**.
-- `git diff --stat -- web/` (this round, on top of the already-reported
-  B3 state): `web/src/lib/api.ts` unchanged this round;
-  `web/src/pages/opportunityFeed.ts` (+/-10 lines),
-  `web/src/pages/today.ts` (cumulative B3+badges diff vs. pre-B3
-  baseline: 340 insertions/142 deletions). `web/src/lib/navBadges.ts` and
-  `web/tests/navBadges.test.ts` are new/untracked.
+- `api/tests/dailyQueue.test.ts` — **28/28 passed** (19 pre-B5 + 9 new).
+- `api/tests/opportunityFeed.test.ts` — **31/31** (+1).
+- `api/tests/todayView.test.ts` — **44/44** (+1).
+- `api/tests/opportunity-feed.route.test.ts` — **41/41** (+1).
+- Full backend suite: **713/713 passed**, zero regressions.
+- Backend typecheck: all three configs (`tsconfig.json`,
+  `tsconfig.tests.json`, `tsconfig.scripts.json`) clean.
+- `web/tests/dailyQueue.test.ts` — **13/13** (+2).
+- Full frontend suite: **54/54 passed**.
+- Frontend typecheck (`tsconfig.json`, `tsconfig.tests.json`) clean;
+  production build succeeded (69 modules, no errors).
+- `git diff --stat` against `matchEngine.ts`, `skillNormalization.ts`,
+  `dedupFingerprint.ts`, `expireStaleOpportunities.ts`, and
+  `supabase/migrations/` was empty before packaging.
 
 ## Status
 
-With this, all of the Phase B audit's IN-SCOPE items plus the P2
-nav-badge polish are done. The one remaining, explicitly-deferred item
-is **B5 — deadline-aware urgency for unapplied opportunities**, which
-was scoped as a separate future gate from the start, not part of Phase B
-proper.
+With B5, every item identified in the original Phase B audit — including
+both explicitly-deferred follow-ups (nav badges and this gate) — is now
+implemented.

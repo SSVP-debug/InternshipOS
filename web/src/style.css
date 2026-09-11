@@ -455,6 +455,15 @@ textarea {
   color: var(--accent-priority);
 }
 
+/* Phase B5 — Daily Queue's "opportunity_deadline" badge (pages/today.ts).
+   Same accent-priority tokens .pill--applying/.pill--assessment already
+   use, under its own name rather than repurposing an application-status
+   class for an unrelated (opportunity urgency) meaning. */
+.pill--deadline {
+  background: var(--accent-priority-bg);
+  color: var(--accent-priority);
+}
+
 .pill--applied,
 .pill--interview,
 .pill--saved-inbox {
