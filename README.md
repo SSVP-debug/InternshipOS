@@ -1,87 +1,77 @@
-# InternshipOS — Phase B3: Student-Facing Daily Queue
+# InternshipOS — Phase B follow-up: Nav Badge Polish (P2)
 
 ## What this is
 
-Frontend-only files for this round. Drop into the matching paths in the
-repo and merge. No backend files are included because none changed —
-`api/src/lib/dailyQueue.ts` (B1) and the `/today` route/view (B2) are
-untouched, confirmed byte-identical to the approved B2 drop before
-packaging.
+A small, optional follow-up to Phase B (flagged as P2 in the original
+Phase B audit — "cheap and low-priority, cut if time-constrained").
+Frontend-only. Drop into the matching paths and merge.
 
 ```
-web/src/lib/api.ts             (modified — new DailyQueueItem type + daily_queue field)
-web/src/lib/dailyQueue.ts      (new — pure display-logic helpers)
-web/src/pages/today.ts         (modified — "What should I do next?" section)
-web/tests/dailyQueue.test.ts   (new)
+web/src/lib/navBadges.ts         (new)
+web/src/pages/today.ts           (modified — now includes both the
+                                   Phase B3 Daily Queue section AND this
+                                   round's badge wiring; this is the full
+                                   current file, supersedes the B3 drop)
+web/src/pages/opportunityFeed.ts (modified — badge wiring only)
+web/tests/navBadges.test.ts      (new)
 ```
 
 ## What changed
 
-Today's page now renders the API's `daily_queue` field as its first,
-most prominent section:
+`shell.ts`'s `renderShell()` has always accepted an optional `badges`
+param, but every call site passed the default `{}` — no sidebar nav item
+ever showed a count. This gate wires two of them up:
 
-- **Heading:** "What should I do next?" / "A short list of the most
-  useful things to act on today." — no AI/automation/certainty language.
-- **`action_required` items** reuse the existing `actionStub()` renderer
-  unchanged (same look as "Needs your attention" elsewhere on the page).
-- **`match` items** reuse the existing Feed actions exactly —
-  `updateOpportunityMatchInbox()` (Save/Dismiss/Priority) and
-  `bulkApply()` (Start application) — no new endpoints, no new actions,
-  no auto-apply.
-- **Order is authoritative:** the frontend renders `daily_queue` exactly
-  as received — no client-side re-sort, re-filter, or re-cap (the API
-  already caps at 5).
-- **Empty state** ("You're all caught up...") is explicitly distinguished
-  from an **"unavailable" state** (queue field missing/malformed) via a
-  new pure helper, `classifyDailyQueueState()` — the honest empty-state
-  copy is never shown when the truth is "we don't know."
-- Local actions (save/dismiss/apply) remove the affected item from the
-  visible queue immediately, mirroring the backend's own membership rule
-  (no longer `inbox_status: "new"`).
+- **Today** nav link now shows a badge = the live Daily Queue length
+  (`todayBadgeCount`), re-computed on every `draw()` so it stays in sync
+  as queue items are actioned (saved/dismissed/applied).
+- **Feed** nav link now shows a badge = the count of untriaged,
+  not-yet-promoted, non-ineligible matches (`feedBadgeCount`) — the
+  *exact same definition* `api/src/lib/todayView.ts`'s `summarizeItems()`
+  already uses for `feed_summary.new_matches_count`, reproduced on the
+  frontend (not re-derived differently) only because the Feed page's own
+  fetch returns raw items, not that precomputed count.
+- A badge is **absent** (not shown as "0", not stale) whenever its count
+  isn't known — e.g. Today's badge doesn't appear while browsing Feed,
+  since that would require fetching Today's own data from a page that
+  isn't Today. No new API calls, no cross-page shared state.
+- `0` is never rendered as a badge (`shell.ts`'s existing
+  `badgeCount ? ... : null` already treated 0 as falsy/hidden) — kept
+  as-is.
 
 ## What did NOT change
 
-- No new route (`/daily-queue` was not created).
-- No new API endpoint.
-- No schema/migration changes.
-- No changes to `api/src/lib/dailyQueue.ts`, `matchEngine.ts`,
-  `skillNormalization.ts`, `dedupFingerprint.ts`,
-  `expireStaleOpportunities.ts`, or Feed ranking — all confirmed
-  untouched.
-- No new application states, no auto-apply, no AI-generated
-  explanations — every "why" shown is a literal existing signal
-  (deadline/follow-up reason, or "New match").
-
-## A note on frontend test coverage
-
-This repo's `web/vitest.config.ts` is explicitly node-only with no
-jsdom/DOM-rendering capability (documented in that file's own header
-comment as a deliberate, separate decision the repo hasn't made — no
-existing page, including the pre-B3 `today.ts` or `opportunityFeed.ts`,
-has DOM-render tests either). So the new tests cover everything that
-*is* pure and testable under the existing setup — `classifyDailyQueueState`,
-`dailyQueueItemKey`, order preservation, `formatMatchMeta` — while actual
-DOM wiring was verified via a clean typecheck and production build
-rather than introducing new test infrastructure outside this gate's scope.
+- No backend changes at all — confirmed via `git diff --stat` that only
+  `web/` files changed this round.
+- No new API fields, no new endpoints.
+- No changes to `api/src/lib/dailyQueue.ts`, matching/scoring/expiry
+  logic, or Feed ranking.
+- No new nav items, no redesign of the sidebar — only badges on two
+  existing links, using the CSS class (`.nav__badge`) that was already
+  defined in `style.css` but unused until now.
 
 ## Validation performed before this drop
 
-- `web/tests/dailyQueue.test.ts` — **11/11 passed**.
-- Full frontend suite: `npx vitest run` (web) — **47/47 passed** (36
-  pre-existing + 11 new), zero regressions.
+- `web/tests/navBadges.test.ts` — **5/5 passed**.
+- Full frontend suite: `npx vitest run` (web) — **52/52 passed** (47
+  pre-existing + 5 new), zero regressions.
 - Frontend typecheck: `tsconfig.json` and `tsconfig.tests.json` — both
   clean.
-- Frontend production build: `npm run build` — succeeded (68 modules,
-  no errors).
-- Backend full suite (safety check, no backend files changed): **701/701
-  passed**.
-- Backend typecheck (safety check): all three configs clean.
-- `git diff --stat -- web/`: 2 files changed, 322 insertions(+), 139
-  deletions(-); `web/src/lib/dailyQueue.ts` and
-  `web/tests/dailyQueue.test.ts` are new/untracked. No other files in the
-  working tree changed this round.
+- Frontend production build: `npm run build` — succeeded (69 modules, no
+  errors).
+- Backend full suite (safety check, no backend files changed):
+  **701/701 passed**.
+- `git diff --stat -- web/` (this round, on top of the already-reported
+  B3 state): `web/src/lib/api.ts` unchanged this round;
+  `web/src/pages/opportunityFeed.ts` (+/-10 lines),
+  `web/src/pages/today.ts` (cumulative B3+badges diff vs. pre-B3
+  baseline: 340 insertions/142 deletions). `web/src/lib/navBadges.ts` and
+  `web/tests/navBadges.test.ts` are new/untracked.
 
-## Next steps (future gates, not in this drop)
+## Status
 
-- B5 (optional, separate design sign-off): deadline-aware urgency for
-  unapplied opportunities feeding into the queue.
+With this, all of the Phase B audit's IN-SCOPE items plus the P2
+nav-badge polish are done. The one remaining, explicitly-deferred item
+is **B5 — deadline-aware urgency for unapplied opportunities**, which
+was scoped as a separate future gate from the start, not part of Phase B
+proper.

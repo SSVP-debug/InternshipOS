@@ -27,6 +27,7 @@ import {
   type OpportunityFeedItem,
   type ResumeFeedGroup,
 } from "../lib/api";
+import { feedBadgeCount } from "../lib/navBadges";
 import { navigate } from "../lib/router";
 
 function pill(text: string, cls: string): HTMLElement {
@@ -47,7 +48,7 @@ function eligibilityPill(status: OpportunityFeedItem["eligibility_status"]): HTM
 }
 
 export async function renderOpportunityFeed(root: HTMLElement) {
-  const main = renderShell(root, "/feed");
+  let main = renderShell(root, "/feed");
   main.append(h("div", { class: "page-loading" }, ["Loading your feed…"]));
 
   let items: OpportunityFeedItem[];
@@ -87,7 +88,12 @@ export async function renderOpportunityFeed(root: HTMLElement) {
   }
 
   function draw() {
-    main.innerHTML = "";
+    // Small Phase B follow-up ("nav badge polish"): re-mount the shell's
+    // nav on every draw so the Feed sidebar link's badge stays in sync as
+    // matches are saved/dismissed/applied — see navBadges.ts's own header
+    // for why this is Feed's own, self-contained count (computed from
+    // this page's own already-fetched `items`, not a new API call).
+    main = renderShell(root, "/feed", { "/feed": feedBadgeCount(items) });
     main.append(
       h("div", { class: "page-header" }, [
         h("h1", {}, ["Feed"]),

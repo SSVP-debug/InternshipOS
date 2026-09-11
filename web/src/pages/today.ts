@@ -10,6 +10,7 @@ import {
   type OpportunityFeedItem,
 } from "../lib/api";
 import { classifyDailyQueueState, dailyQueueItemKey, formatMatchMeta } from "../lib/dailyQueue";
+import { todayBadgeCount } from "../lib/navBadges";
 import { navigate } from "../lib/router";
 
 function actionStub(item: TodayActionItem): HTMLElement {
@@ -41,7 +42,7 @@ function actionStub(item: TodayActionItem): HTMLElement {
 }
 
 export async function renderToday(root: HTMLElement) {
-  const main = renderShell(root, "/today");
+  let main = renderShell(root, "/today");
 
   main.append(h("div", { class: "page-loading" }, ["Loading your day…"]));
 
@@ -209,7 +210,15 @@ export async function renderToday(root: HTMLElement) {
   }
 
   function draw() {
-    main.innerHTML = "";
+    // Small Phase B follow-up ("nav badge polish"): re-mount the shell's
+    // nav on every draw so the Today sidebar link's badge stays in sync
+    // with the live daily_queue length as items are actioned — see
+    // navBadges.ts's own header for why this is Today's own,
+    // self-contained count (no cross-page data). renderShell() returns a
+    // fresh, already-empty <main>, so there's no separate
+    // `main.innerHTML = ""` step needed here (see shell.ts's own comment
+    // on why a brand-new <main> is swapped in on every call).
+    main = renderShell(root, "/today", { "/today": todayBadgeCount(dailyQueue) });
 
     main.append(
       h("div", { class: "page-header" }, [
