@@ -565,6 +565,15 @@ export interface TodayFeedSummary {
   top_matches: TodayFeedHighlight[];
   last_ingested_at: string | null;
 }
+// Phase B3 (frontend types for the Phase B2 API field): mirrors the
+// backend's DailyQueueItem discriminated union exactly (see
+// api/src/lib/dailyQueue.ts) — a flat, capped (≤5), already-ordered list
+// the frontend renders as-is (see pages/today.ts's "What should I do
+// next?" section). No client-side re-ranking/re-filtering is performed;
+// the backend order and membership are authoritative.
+export type DailyQueueItem =
+  | { reason: "action_required"; id: string; action: TodayActionItem }
+  | { reason: "match"; id: string; opportunity: OpportunityFeedItem };
 export interface TodayView {
   generated_at: string;
   action_required: TodayActionItem[];
@@ -574,6 +583,14 @@ export interface TodayView {
   recently_applied: TodayRecentlyApplied[];
   pipeline_summary: Record<string, number>;
   feed_summary: TodayFeedSummary;
+  // Additive (Phase B2/B3) — always an array ([] when nothing is
+  // eligible), but typed optional here defensively: a caller on an older
+  // cached bundle/deployment mismatch could see a /today response from
+  // before this field existed. pages/today.ts treats a missing/non-array
+  // value as "queue unavailable" (an honest fallback), never as an empty
+  // queue — see that file's own comment for why conflating the two would
+  // be an A2 honesty violation.
+  daily_queue?: DailyQueueItem[];
   stats: {
     total_applications: number;
     active_applications: number;
