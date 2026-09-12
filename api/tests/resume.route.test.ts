@@ -3,9 +3,9 @@ import type { Response } from "express";
 import type { AuthedRequest } from "../src/middleware/auth.js";
 import { resumeRouter } from "../src/routes/resume.js";
 
-const CANDIDATE_ID = "00000000-0000-0000-0000-000000000000";
-const RESUME_ID = "11111111-1111-1111-1111-111111111111";
-const SKILL_ID = "22222222-2222-2222-2222-222222222222";
+const CANDIDATE_ID = "00000000-0000-4000-8000-000000000000";
+const RESUME_ID = "11111111-1111-4111-8111-111111111111";
+const SKILL_ID = "22222222-2222-4222-8222-222222222222";
 
 interface RouteLayer {
   route?: {

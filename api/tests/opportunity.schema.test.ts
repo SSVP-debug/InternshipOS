@@ -123,7 +123,7 @@ describe("OpportunityInboxUpdateSchema", () => {
 });
 
 describe("BulkApplyRequestSchema (Gate R5)", () => {
-  const id = (n: number) => `${String(n).padStart(8, "0")}-1111-1111-1111-111111111111`;
+  const id = (n: number) => `${String(n).padStart(8, "0")}-1111-4111-8111-111111111111`;
 
   it("accepts a single opportunity_match_id", () => {
     const result = BulkApplyRequestSchema.safeParse({ opportunity_match_ids: [id(1)] });

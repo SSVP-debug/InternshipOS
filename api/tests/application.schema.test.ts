@@ -5,7 +5,7 @@ import {
   ApplicationStatusTransitionSchema,
 } from "../src/lib/schemas.js";
 
-const validOpportunityId = "11111111-1111-1111-1111-111111111111";
+const validOpportunityId = "11111111-1111-4111-8111-111111111111";
 
 describe("ApplicationCreateRequestSchema", () => {
   it("accepts a minimal valid record (opportunity_id only)", () => {
@@ -59,7 +59,7 @@ describe("ApplicationCreateRequestSchema", () => {
   it("Gate R4: accepts an optional resume_id", () => {
     const result = ApplicationCreateRequestSchema.safeParse({
       opportunity_id: validOpportunityId,
-      resume_id: "22222222-2222-2222-2222-222222222222",
+      resume_id: "22222222-2222-4222-8222-222222222222",
     });
     expect(result.success).toBe(true);
   });
@@ -108,7 +108,7 @@ describe("ApplicationUpdateRequestSchema", () => {
   // ── Gate R4: resume_id IS editable here, unlike opportunity_id/status ──
 
   it("Gate R4: accepts a resume_id to set/correct which resume was used", () => {
-    const result = ApplicationUpdateRequestSchema.safeParse({ resume_id: "22222222-2222-2222-2222-222222222222" });
+    const result = ApplicationUpdateRequestSchema.safeParse({ resume_id: "22222222-2222-4222-8222-222222222222" });
     expect(result.success).toBe(true);
   });
 

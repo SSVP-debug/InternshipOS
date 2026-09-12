@@ -74,7 +74,7 @@ function queryResult(data: unknown, error: { message: string; code?: string } | 
 }
 
 const CANDIDATE_ID = "cand-1";
-const MATCH_ID = "11111111-1111-1111-1111-111111111111";
+const MATCH_ID = "11111111-1111-4111-8111-111111111111";
 const SOURCE_ID = "source-1";
 
 const ACTIVE_SOURCE_ROW = {
@@ -594,7 +594,7 @@ describe("PATCH /opportunity-matches/:id/inbox", () => {
     expect(res.status).toHaveBeenCalledWith(400);
   });
 
-  const OWNED_OPPORTUNITY_ID = "22222222-2222-2222-2222-222222222222";
+  const OWNED_OPPORTUNITY_ID = "22222222-2222-4222-8222-222222222222";
 
   it("accepts promoted_opportunity_id alone (no inbox_status/is_priority required)", async () => {
     const supabase = makeSupabaseMock({
@@ -681,11 +681,11 @@ describe("PATCH /opportunity-matches/:id/inbox", () => {
 
 // ── Gate R5: POST /opportunity-matches/bulk-apply ──────────────────────
 
-const SOURCE_A_ID = "aaaaaaaa-0000-0000-0000-000000000001";
-const SOURCE_B_ID = "aaaaaaaa-0000-0000-0000-000000000002";
-const MATCH_A_ID = "bbbbbbbb-0000-0000-0000-000000000001";
-const MATCH_B_ID = "bbbbbbbb-0000-0000-0000-000000000002";
-const RESUME_ID = "cccccccc-0000-0000-0000-000000000001";
+const SOURCE_A_ID = "aaaaaaaa-0000-4000-8000-000000000001";
+const SOURCE_B_ID = "aaaaaaaa-0000-4000-8000-000000000002";
+const MATCH_A_ID = "bbbbbbbb-0000-4000-8000-000000000001";
+const MATCH_B_ID = "bbbbbbbb-0000-4000-8000-000000000002";
+const RESUME_ID = "cccccccc-0000-4000-8000-000000000001";
 
 const SOURCE_ROW_TEMPLATE = {
   source_type: "job_board",
