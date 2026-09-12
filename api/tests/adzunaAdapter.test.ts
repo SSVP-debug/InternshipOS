@@ -5,14 +5,14 @@ import { adzunaSampleResponse } from "./fixtures/adzunaSample.js";
 describe("parseAdzunaListings", () => {
   it("reports the raw result count as fetched, independent of filtering", () => {
     const { fetched } = parseAdzunaListings(adzunaSampleResponse);
-    expect(fetched).toBe(7); // all 7 raw results returned by the API, before any filtering
+    expect(fetched).toBe(9); // all 9 raw results returned by the API, before any filtering
   });
 
   it("drops non-internship postings and the malformed entry missing company", () => {
     const { listings } = parseAdzunaListings(adzunaSampleResponse);
-    // Of 7 raw results: 1 malformed (missing company.display_name) and 2
-    // non-internship postings are dropped -> 4 canonical listings remain.
-    expect(listings).toHaveLength(4);
+    // Of 9 raw results: 1 malformed (missing company.display_name) and 2
+    // non-internship postings are dropped -> 6 canonical listings remain.
+    expect(listings).toHaveLength(6);
   });
 
   it("never treats 'International ...' as an internship match (word-boundary filter)", () => {

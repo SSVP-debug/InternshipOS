@@ -1,7 +1,7 @@
 # Plan 002 — Fix stale hardcoded counts in ingestion adapter tests
 
 **Written against commit:** `e311775` (branch: `master`)
-**Status:** TODO
+**Status:** DONE (executed and verified 2026-09-12)
 **Depends on:** none (independent of Plan 001 — different root cause,
 different files; safe to do in either order or in parallel)
 

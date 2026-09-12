@@ -8,7 +8,7 @@ commit `e311775` on `master`.
 | Plan | Finding | Leverage | Status | Depends on |
 |---|---|---|---|---|
 | [001](001-fix-zod-v4-uuid-test-fixtures.md) | Zod v3→v4 bump broke UUID validation in 6 test files (55 of 59 currently-failing tests) | High — small fix, currently-red CI | **DONE** | none |
-| [002](002-fix-stale-adapter-test-fixture-counts.md) | Stale hardcoded fixture counts in 2 adapter test files (remaining 4 of 59 failing tests) | Medium — small fix, restores real regression coverage | TODO | none |
+| [002](002-fix-stale-adapter-test-fixture-counts.md) | Stale hardcoded fixture counts in 2 adapter test files (remaining 4 of 59 failing tests) | Medium — small fix, restores real regression coverage | **DONE** | none |
 
 Plans 001 and 002 are independent — different root causes, disjoint
 files. Do them in either order, or in parallel.

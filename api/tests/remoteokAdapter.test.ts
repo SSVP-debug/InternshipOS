@@ -5,14 +5,14 @@ import { remoteOkSampleResponse } from "./fixtures/remoteokSample.js";
 describe("parseRemoteOkListings", () => {
   it("reports the raw entry count as fetched, independent of filtering", () => {
     const { fetched } = parseRemoteOkListings(remoteOkSampleResponse);
-    expect(fetched).toBe(5); // all 5 raw entries in the fixture, including the legal notice
+    expect(fetched).toBe(7); // all 7 raw entries in the fixture, including the legal notice
   });
 
   it("drops the leading legal-notice entry and any malformed entries", () => {
     const { listings } = parseRemoteOkListings(remoteOkSampleResponse);
-    // Of 5 raw entries: 1 legal notice + 1 malformed (missing company) +
-    // 1 non-internship posting are dropped -> 2 canonical listings remain.
-    expect(listings).toHaveLength(2);
+    // Of 7 raw entries: 1 legal notice + 1 malformed (missing company) +
+    // 1 non-internship posting are dropped -> 4 canonical listings remain.
+    expect(listings).toHaveLength(4);
   });
 
   it("filters out non-internship postings", () => {
