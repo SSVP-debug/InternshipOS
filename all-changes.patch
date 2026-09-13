@@ -1,3 +1,400 @@
+diff --git a/api/src/lib/env.ts b/api/src/lib/env.ts
+index f4643a6..fd5533c 100644
+--- a/api/src/lib/env.ts
++++ b/api/src/lib/env.ts
+@@ -42,6 +42,26 @@ const EnvSchema = z.object({
+   // see that file's header comment for why signup specifically gets its
+   // own, stricter limit.
+   SIGNUP_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(5),
++
++  // Gate R8 — kill switch for POST /applications/:id/submit-to-ats
++  // (api/src/lib/ats/leverAdapter.ts). Off by default: this route sends a
++  // real application to a real employer on the candidate's behalf, unlike
++  // every other route in this codebase, which only ever touches this
++  // candidate's own tracking data. Defaulting to false means a fresh
++  // deploy (or a forgotten env var) never accidentally exposes live
++  // external submission. Per-request dry_run defaults still apply on top
++  // of this flag — see that route's own comment for the two-layer
++  // reasoning.
++  //
++  // Deliberately NOT z.coerce.boolean(): zod's coercion runs the string
++  // through JS's Boolean(), where Boolean("false") is true — setting
++  // EXTERNAL_ATS_SUBMISSION_ENABLED=false in an env file would silently
++  // turn the flag ON under z.coerce.boolean(). An explicit string enum +
++  // transform avoids that trap entirely.
++  EXTERNAL_ATS_SUBMISSION_ENABLED: z
++    .enum(["true", "false"])
++    .default("false")
++    .transform((v) => v === "true"),
+ });
+ 
+ export type Env = z.infer<typeof EnvSchema>;
+diff --git a/api/src/lib/schemas.ts b/api/src/lib/schemas.ts
+index 61dcd0a..d7a697b 100644
+--- a/api/src/lib/schemas.ts
++++ b/api/src/lib/schemas.ts
+@@ -427,3 +427,17 @@ export const ApplicationNoteRequestSchema = z.object({
+   content: z.string().trim().min(1),
+ });
+ export type ApplicationNoteRequest = z.infer<typeof ApplicationNoteRequestSchema>;
++
++// ── Gate R8 — external ATS submission ────────────────────────────────────
++// dry_run defaults to true — a request body with the field simply omitted
++// (the common case for a first try, or a client that hasn't been updated
++// to think carefully about this) NEVER accidentally submits for real.
++// Only an explicit `dry_run: false` performs the live submission. See
++// application.ts's POST /applications/:id/submit-to-ats for the full
++// safety posture (this is one of two independent layers — the other is
++// env.ts's EXTERNAL_ATS_SUBMISSION_ENABLED server-side kill switch).
++export const ApplicationSubmitToAtsRequestSchema = z.object({
++  dry_run: z.boolean().optional().default(true),
++  comments: z.string().trim().max(4000).optional(),
++});
++export type ApplicationSubmitToAtsRequest = z.infer<typeof ApplicationSubmitToAtsRequestSchema>;
+diff --git a/api/src/routes/application.ts b/api/src/routes/application.ts
+index f37d9f9..171e450 100644
+--- a/api/src/routes/application.ts
++++ b/api/src/routes/application.ts
+@@ -13,6 +13,25 @@
+ //                                    same request (see 0019's migration
+ //                                    header for why this is done at the API
+ //                                    layer, not a DB trigger)
++// POST  /applications/:id/submit-to-ats — Gate R8: actually submits the
++//                                    application to the employer, through
++//                                    Lever's public postings-apply
++//                                    endpoint ONLY (see leverAdapter.ts's
++//                                    header for why Lever specifically).
++//                                    Two independent safety layers gate
++//                                    this: env.EXTERNAL_ATS_SUBMISSION_ENABLED
++//                                    (server-wide kill switch, default
++//                                    off) and the request body's dry_run
++//                                    (default true — a dry run validates
++//                                    everything and reports what WOULD be
++//                                    sent, without ever calling Lever).
++//                                    On a real (dry_run: false) success,
++//                                    advances status through
++//                                    APPLYING -> APPLIED (writing the same
++//                                    application_status_event history PATCH
++//                                    /status writes) and records
++//                                    ats_provider/ats_external_id/
++//                                    ats_submitted_at (0030's migration).
+ //
+ // No DELETE route — see 0018_application.sql's header: WITHDRAWN is the
+ // intended terminal state for "no longer pursuing this," preserving
+@@ -34,16 +53,27 @@
+ 
+ import { Router } from "express";
+ import type { AuthedRequest } from "../middleware/auth.js";
++import type { Env } from "../lib/env.js";
+ import {
+   ApplicationCreateRequestSchema,
+   ApplicationUpdateRequestSchema,
+   ApplicationStatusTransitionSchema,
++  ApplicationSubmitToAtsRequestSchema,
+   UuidParamSchema,
+ } from "../lib/schemas.js";
++import { parseLeverPostingUrl, getLeverPosting, submitLeverApplication } from "../lib/ats/leverAdapter.js";
++
++const EVIDENCE_BUCKET = "evidence-documents";
++const DOWNLOAD_URL_EXPIRY_SECONDS = 60; // short-lived — used immediately, server-side, never returned to a client
+ 
+ const APPLICATION_COLUMNS =
+   "id, opportunity_id, resume_id, status, applied_at, deadline_override, next_action_date, " +
+-  "next_action_note, recruiter_name, recruiter_email, created_at, updated_at";
++  "next_action_note, recruiter_name, recruiter_email, created_at, updated_at, " +
++  // Gate R8 — without these, GET /applications and GET /applications/:id
++  // would never surface whether/how an application was auto-submitted,
++  // and submit-to-ats's own success response (built from this same
++  // constant) would silently omit the very fields it just wrote.
++  "ats_provider, ats_external_id, ats_submitted_at, ats_submission_error";
+ 
+ const OPPORTUNITY_SUMMARY_COLUMNS =
+   "id, title, company, location, work_mode, application_url, deadline_date";
+@@ -82,6 +112,11 @@ interface ApplicationDbRow {
+   recruiter_email: string | null;
+   created_at: string;
+   updated_at: string;
++  // Gate R8
++  ats_provider: string | null;
++  ats_external_id: string | null;
++  ats_submitted_at: string | null;
++  ats_submission_error: string | null;
+ }
+ 
+ interface OpportunitySummaryDbRow {
+@@ -112,7 +147,7 @@ async function getOwnCandidateId(req: AuthedRequest): Promise<string | null> {
+   return data.id as string;
+ }
+ 
+-export function applicationRouter(): Router {
++export function applicationRouter(env: Env): Router {
+   const router = Router();
+ 
+   router.get("/applications", async (req: AuthedRequest, res) => {
+@@ -444,5 +479,250 @@ export function applicationRouter(): Router {
+     return res.status(200).json({ application: data });
+   });
+ 
++  // Gate R8 — see this file's header comment and leverAdapter.ts's header
++  // for the full scope/safety reasoning. Every failure branch below
++  // returns before calling Lever — nothing here calls submitLeverApplication
++  // except the single call at the very end, after every precondition and
++  // (for a real, non-dry-run attempt) the live posting check have passed.
++  router.post("/applications/:id/submit-to-ats", async (req: AuthedRequest, res) => {
++    if (!env.EXTERNAL_ATS_SUBMISSION_ENABLED) {
++      return res.status(403).json({
++        error: "external_ats_submission_disabled",
++        message: "External ATS submission is disabled on this server (EXTERNAL_ATS_SUBMISSION_ENABLED is not set).",
++      });
++    }
++
++    const idParsed = UuidParamSchema.safeParse(req.params.id);
++    if (!idParsed.success) {
++      return res.status(400).json({ error: "invalid_id" });
++    }
++    const bodyParsed = ApplicationSubmitToAtsRequestSchema.safeParse(req.body ?? {});
++    if (!bodyParsed.success) {
++      return res.status(400).json({ error: "invalid_request", details: bodyParsed.error.flatten() });
++    }
++    const { dry_run, comments } = bodyParsed.data;
++
++    const supabase = req.supabase!;
++    const candidateId = await getOwnCandidateId(req);
++    if (!candidateId) {
++      return res.status(404).json({ error: "candidate_not_found" });
++    }
++
++    const { data: applicationRaw, error: applicationError } = await supabase
++      .from("application")
++      .select("id, status, resume_id, opportunity_id")
++      .eq("id", idParsed.data)
++      .maybeSingle();
++    if (applicationError) {
++      return res.status(400).json({ error: "application_fetch_failed", message: applicationError.message });
++    }
++    if (!applicationRaw) {
++      return res.status(404).json({ error: "application_not_found" });
++    }
++    const application = applicationRaw as unknown as Pick<ApplicationDbRow, "id" | "status" | "resume_id" | "opportunity_id">;
++
++    // Only SAVED or APPLYING may proceed — anything further along has
++    // (per this application's own status history) already been submitted
++    // or is past that point (REJECTED/OFFER/WITHDRAWN), and re-submitting
++    // to the employer a second time is never the right default behavior.
++    // A candidate who genuinely needs to resubmit can still do the whole
++    // thing manually via "Open listing" — this route only ever guards its
++    // own automated path, not the manual one.
++    if (application.status !== "SAVED" && application.status !== "APPLYING") {
++      return res.status(409).json({
++        error: "application_not_eligible_for_submission",
++        message: `Application status is ${application.status}; only SAVED or APPLYING applications can be auto-submitted.`,
++      });
++    }
++
++    if (!application.resume_id) {
++      return res.status(422).json({ error: "no_resume_selected", message: "This application has no resume_id set." });
++    }
++
++    const [opportunityResult, resumeResult, personalInfoResult] = await Promise.all([
++      supabase.from("opportunity").select("id, application_url").eq("id", application.opportunity_id).maybeSingle(),
++      supabase.from("resume").select("id, evidence_source_id").eq("id", application.resume_id).maybeSingle(),
++      supabase
++        .from("personal_info")
++        .select("legal_first_name, legal_last_name, email, phone")
++        .maybeSingle(),
++    ]);
++    if (opportunityResult.error || resumeResult.error || personalInfoResult.error) {
++      const firstError = opportunityResult.error ?? resumeResult.error ?? personalInfoResult.error;
++      return res.status(400).json({ error: "application_fetch_failed", message: firstError!.message });
++    }
++
++    const opportunity = opportunityResult.data as { id: string; application_url: string | null } | null;
++    if (!opportunity?.application_url) {
++      return res.status(422).json({ error: "opportunity_missing_application_url" });
++    }
++
++    const leverRef = parseLeverPostingUrl(opportunity.application_url);
++    if (!leverRef) {
++      return res.status(422).json({
++        error: "unsupported_ats",
++        message: "Auto-submission currently only supports Lever-hosted postings (jobs.lever.co/...).",
++      });
++    }
++
++    const resume = resumeResult.data as { id: string; evidence_source_id: string | null } | null;
++    if (!resume?.evidence_source_id) {
++      return res.status(422).json({
++        error: "resume_missing_file",
++        message: "The selected resume has no attached document — nothing to submit as a resume file.",
++      });
++    }
++
++    const { data: evidenceSourceRaw, error: evidenceSourceError } = await supabase
++      .from("evidence_source")
++      .select("source_type, file_ref, title")
++      .eq("id", resume.evidence_source_id)
++      .maybeSingle();
++    if (evidenceSourceError) {
++      return res.status(400).json({ error: "application_fetch_failed", message: evidenceSourceError.message });
++    }
++    const evidenceSource = evidenceSourceRaw as { source_type: string; file_ref: string | null; title: string } | null;
++    if (!evidenceSource || evidenceSource.source_type !== "document_upload" || !evidenceSource.file_ref) {
++      return res.status(422).json({
++        error: "resume_missing_file",
++        message: "The selected resume's evidence source is not an uploaded document.",
++      });
++    }
++
++    const personalInfo = personalInfoResult.data as
++      | { legal_first_name: string; legal_last_name: string; email: string; phone: string | null }
++      | null;
++    if (!personalInfo?.legal_first_name || !personalInfo.legal_last_name || !personalInfo.email) {
++      return res.status(422).json({
++        error: "personal_info_incomplete",
++        message: "Legal name and email must be filled in under Profile before auto-submitting an application.",
++      });
++    }
++
++    const postingResult = await getLeverPosting(leverRef);
++    if (!postingResult.ok) {
++      return res.status(422).json({
++        error: "ats_posting_unavailable",
++        message: postingResult.message,
++      });
++    }
++    if (postingResult.posting.state !== "published") {
++      return res.status(422).json({
++        error: "opportunity_closed",
++        message: `This posting's current state on Lever is "${postingResult.posting.state}", not "published".`,
++      });
++    }
++
++    const wouldSubmit = {
++      site: leverRef.site,
++      posting_id: leverRef.postingId,
++      posting_title: postingResult.posting.text,
++      name: `${personalInfo.legal_first_name} ${personalInfo.legal_last_name}`,
++      email: personalInfo.email,
++      phone: personalInfo.phone ?? undefined,
++      comments: comments ?? undefined,
++      resume_title: evidenceSource.title,
++    };
++
++    if (dry_run) {
++      return res.status(200).json({ dry_run: true, would_submit: wouldSubmit });
++    }
++
++    // Real submission from here on. Fetch the resume file's bytes via a
++    // short-lived signed URL — same storage/RLS pattern as GET
++    // /evidence-sources/:id/download-url, just consumed server-side
++    // instead of handed to a client.
++    const { data: signedUrlData, error: signedUrlError } = await supabase.storage
++      .from(EVIDENCE_BUCKET)
++      .createSignedUrl(evidenceSource.file_ref, DOWNLOAD_URL_EXPIRY_SECONDS);
++    if (signedUrlError || !signedUrlData) {
++      return res.status(502).json({
++        error: "resume_file_unavailable",
++        message: signedUrlError?.message ?? "Could not create a signed URL for the resume file.",
++      });
++    }
++
++    let resumeBytes: ArrayBuffer;
++    let resumeContentType: string;
++    try {
++      const fileResponse = await fetch(signedUrlData.signedUrl);
++      if (!fileResponse.ok) {
++        throw new Error(`storage download returned ${fileResponse.status}`);
++      }
++      resumeBytes = await fileResponse.arrayBuffer();
++      resumeContentType = fileResponse.headers.get("content-type") ?? "application/octet-stream";
++    } catch (err) {
++      return res.status(502).json({
++        error: "resume_file_download_failed",
++        message: err instanceof Error ? err.message : "unknown error downloading resume file",
++      });
++    }
++
++    const filename = evidenceSource.file_ref.split("/").pop() ?? "resume";
++    const submitResult = await submitLeverApplication(leverRef, {
++      name: wouldSubmit.name,
++      email: wouldSubmit.email,
++      phone: wouldSubmit.phone,
++      comments: wouldSubmit.comments,
++      resumeFile: { bytes: resumeBytes, filename, contentType: resumeContentType },
++    });
++
++    if (!submitResult.ok) {
++      await supabase.from("application").update({ ats_submission_error: submitResult.message }).eq("id", application.id);
++      return res.status(502).json({ error: "ats_submission_failed", message: submitResult.message });
++    }
++
++    // Success: advance the status machine to APPLIED, going through
++    // APPLYING first if this application was still SAVED — the DB
++    // trigger (0018_application.sql's check_application_status_transition)
++    // does not allow SAVED -> APPLIED directly, same rule PATCH /status is
++    // already subject to. Each hop writes its own application_status_event,
++    // same convention as PATCH /status.
++    let currentStatus = application.status;
++    if (currentStatus === "SAVED") {
++      await supabase.from("application").update({ status: "APPLYING" }).eq("id", application.id);
++      await supabase.from("application_status_event").insert({
++        application_id: application.id,
++        candidate_id: candidateId,
++        from_status: "SAVED",
++        to_status: "APPLYING",
++        note: "Auto-advanced by submit-to-ats before external submission.",
++      });
++      currentStatus = "APPLYING";
++    }
++
++    const { data: finalRaw, error: finalError } = await supabase
++      .from("application")
++      .update({
++        status: "APPLIED",
++        ats_provider: "lever",
++        ats_submitted_at: new Date().toISOString(),
++        ats_submission_error: null,
++      })
++      .eq("id", application.id)
++      .select(APPLICATION_COLUMNS)
++      .maybeSingle();
++    if (finalError || !finalRaw) {
++      // The submission to Lever already succeeded — this failure is only
++      // our own tracking update, so it must not be reported as a failed
++      // submission (that would risk a caller retrying and double-applying).
++      return res.status(200).json({
++        submitted: true,
++        warning: "Application was submitted to Lever successfully, but updating this application's tracked status failed.",
++        message: finalError?.message,
++      });
++    }
++
++    await supabase.from("application_status_event").insert({
++      application_id: application.id,
++      candidate_id: candidateId,
++      from_status: currentStatus,
++      to_status: "APPLIED",
++      note: "Submitted via Lever (submit-to-ats).",
++    });
++
++    return res.status(200).json({ submitted: true, application: finalRaw });
++  });
++
+   return router;
+ }
+diff --git a/api/src/server.ts b/api/src/server.ts
+index 5ea2e7c..c41466e 100644
+--- a/api/src/server.ts
++++ b/api/src/server.ts
+@@ -163,7 +163,7 @@ export function createApp(env: Env): Express {
+   app.use(requireAuth(env), todayRouter());
+   app.use(requireAuth(env), opportunityRouter());
+   app.use(requireAuth(env), opportunityFeedRouter());
+-  app.use(requireAuth(env), applicationRouter());
++  app.use(requireAuth(env), applicationRouter(env));
+   app.use(requireAuth(env), applicationNoteRouter());
+   app.use(requireAuth(env), resumeRouter());
+ 
 diff --git a/api/tests/adzunaAdapter.test.ts b/api/tests/adzunaAdapter.test.ts
 index 7f42fc2..b35afa1 100644
 --- a/api/tests/adzunaAdapter.test.ts
@@ -22,10 +419,48 @@ index 7f42fc2..b35afa1 100644
  
    it("never treats 'International ...' as an internship match (word-boundary filter)", () => {
 diff --git a/api/tests/application.route.test.ts b/api/tests/application.route.test.ts
-index 52614e8..8f26293 100644
+index 52614e8..23e2f5c 100644
 --- a/api/tests/application.route.test.ts
 +++ b/api/tests/application.route.test.ts
-@@ -66,9 +66,9 @@ function queryResult(data: unknown, error: { message: string; code?: string } |
+@@ -1,6 +1,7 @@
+ import { describe, it, expect, vi } from "vitest";
+ import type { Response } from "express";
+ import type { AuthedRequest } from "../src/middleware/auth.js";
++import type { Env } from "../src/lib/env.js";
+ import { applicationRouter } from "../src/routes/application.js";
+ 
+ interface RouteLayer {
+@@ -11,8 +12,27 @@ interface RouteLayer {
+   };
+ }
+ 
+-function getHandlers(method: "get" | "post" | "put" | "patch", path: string) {
+-  const router = applicationRouter() as unknown as { stack: RouteLayer[] };
++// Gate R8: applicationRouter now takes env (for the submit-to-ats kill
++// switch). Every pre-existing test in this file is unaffected by the
++// flag's value — only the new "POST /applications/:id/submit-to-ats"
++// describe block below cares — so this default just needs to be *a*
++// valid Env, with the flag on so those new tests can reach past the
++// switch and exercise the route's own logic; the flag-off 403 case gets
++// its own explicit override.
++const TEST_ENV: Env = {
++  SUPABASE_URL: "https://example.supabase.co",
++  SUPABASE_ANON_KEY: "anon-key",
++  SUPABASE_SERVICE_ROLE_KEY: "service-role-key",
++  PORT: 3000,
++  CONSENT_POLICY_VERSION: "v1.0",
++  NODE_ENV: "test",
++  RATE_LIMIT_WINDOW_MINUTES: 15,
++  SIGNUP_RATE_LIMIT_MAX: 5,
++  EXTERNAL_ATS_SUBMISSION_ENABLED: true,
++};
++
++function getHandlers(method: "get" | "post" | "put" | "patch", path: string, env: Env = TEST_ENV) {
++  const router = applicationRouter(env) as unknown as { stack: RouteLayer[] };
+   const layer = router.stack.find((l) => l.route?.path === path && l.route?.methods[method]);
+   if (!layer?.route) throw new Error(`no route registered for ${method.toUpperCase()} ${path}`);
+   return layer.route.stack.map((s) => s.handle);
+@@ -66,9 +86,9 @@ function queryResult(data: unknown, error: { message: string; code?: string } |
    return builder;
  }
  
@@ -174,3 +609,269 @@ index 0cd7705..db1ff4d 100644
  
  describe("ResumeCreateRequestSchema", () => {
    it("accepts a minimal valid record (label only)", () => {
+diff --git a/web/src/lib/api.ts b/web/src/lib/api.ts
+index edb4671..eaa48ad 100644
+--- a/web/src/lib/api.ts
++++ b/web/src/lib/api.ts
+@@ -479,6 +479,14 @@ export interface Application {
+   // so callers narrow with `"evidence_source_id" in application.resume`
+   // when they specifically need the file id (see applicationDetail.ts).
+   resume?: ApplicationResumeSummary | ApplicationResumeDetail | null;
++  // Gate R8 — set only by a successful (dry_run: false)
++  // POST /applications/:id/submit-to-ats. All null until that's been
++  // tried at least once; ats_submission_error reflects only the most
++  // recent attempt (not an append-only log — see 0030's migration).
++  ats_provider?: string | null;
++  ats_external_id?: string | null;
++  ats_submitted_at?: string | null;
++  ats_submission_error?: string | null;
+ }
+ export interface ApplicationStatusEvent {
+   id: string;
+@@ -518,6 +526,87 @@ export const updateApplication = (
+ export const setApplicationStatus = (id: string, status: ApplicationStatus, note?: string) =>
+   patch<{ application: Application }>(`/applications/${id}/status`, { status, note }).then((b) => b.application);
+ 
++// Gate R8 — see api/src/routes/application.ts's own comment and
++// docs/gate-r8-lever-ats-submission.md for the full behavior/limits.
++// Returns a union rather than throwing on the "not eligible yet"
++// outcomes (unsupported ATS, missing resume file, etc.) — those are
++// expected, common results for most of a candidate's feed (only
++// Lever-hosted postings qualify at all), not exceptional failures, so
++// callers are expected to branch on `ok` rather than wrap this in
++// try/catch the way every other mutating call in this file is used.
++// A genuine network/server error (5xx, invalid JSON, no auth) still
++// throws ApiError like every other function here — only the specific,
++// documented 422/403/409 "can't do this" responses are folded into the
++// return value instead.
++export interface AtsSubmitDryRunResult {
++  ok: true;
++  dry_run: true;
++  would_submit: {
++    site: string;
++    posting_id: string;
++    posting_title: string;
++    name: string;
++    email: string;
++    phone?: string;
++    comments?: string;
++    resume_title: string;
++  };
++}
++export interface AtsSubmitSuccessResult {
++  ok: true;
++  dry_run: false;
++  application: Application;
++}
++export interface AtsSubmitRejectedResult {
++  ok: false;
++  error: string;
++  message?: string;
++}
++export type AtsSubmitResult = AtsSubmitDryRunResult | AtsSubmitSuccessResult | AtsSubmitRejectedResult;
++
++const ATS_REJECTION_CODES = new Set([
++  "external_ats_submission_disabled",
++  "invalid_id",
++  "invalid_request",
++  "candidate_not_found",
++  "application_not_found",
++  "application_not_eligible_for_submission",
++  "no_resume_selected",
++  "opportunity_missing_application_url",
++  "unsupported_ats",
++  "resume_missing_file",
++  "personal_info_incomplete",
++  "ats_posting_unavailable",
++  "opportunity_closed",
++  "resume_file_unavailable",
++  "resume_file_download_failed",
++  "ats_submission_failed",
++]);
++
++export async function submitApplicationToAts(id: string, options: { dry_run: boolean; comments?: string }): Promise<AtsSubmitResult> {
++  try {
++    const body = await post<{ dry_run?: boolean; would_submit?: AtsSubmitDryRunResult["would_submit"]; submitted?: boolean; application?: Application }>(
++      `/applications/${id}/submit-to-ats`,
++      options,
++    );
++    if (body.dry_run && body.would_submit) {
++      return { ok: true, dry_run: true, would_submit: body.would_submit };
++    }
++    if (body.submitted && body.application) {
++      return { ok: true, dry_run: false, application: body.application };
++    }
++    // Shouldn't happen against a well-behaved backend, but surfacing this
++    // as a rejection (rather than throwing) keeps the caller's rendering
++    // logic simple — every non-throw path is "check ok, branch on shape".
++    return { ok: false, error: "unexpected_response", message: "Server response didn't match either expected shape." };
++  } catch (err) {
++    if (err instanceof ApiError && ATS_REJECTION_CODES.has(err.code)) {
++      return { ok: false, error: err.code, message: err.message };
++    }
++    throw err;
++  }
++}
++
+ export const listApplicationNotes = (applicationId: string) =>
+   get<{ notes: ApplicationNote[] }>(`/applications/${applicationId}/notes`).then((b) => b.notes);
+ export const addApplicationNote = (
+diff --git a/web/src/pages/applicationDetail.ts b/web/src/pages/applicationDetail.ts
+index 94e6a76..1a19d7d 100644
+--- a/web/src/pages/applicationDetail.ts
++++ b/web/src/pages/applicationDetail.ts
+@@ -7,11 +7,13 @@ import {
+   addApplicationNote,
+   updateApplicationNote,
+   deleteApplicationNote,
++  submitApplicationToAts,
+   ApiError,
+   type Application,
+   type ApplicationStatus,
+   type ApplicationStatusEvent,
+   type ApplicationNote,
++  type AtsSubmitDryRunResult,
+ } from "../lib/api";
+ 
+ const TRANSITIONS: Record<ApplicationStatus, ApplicationStatus[]> = {
+@@ -67,6 +69,7 @@ export async function renderApplicationDetail(root: HTMLElement, applicationId:
+ 
+     main.append(renderTransitionBar());
+     main.append(renderOpportunityCard());
++    main.append(renderAtsSection());
+     main.append(h("h2", { class: "section-title" }, ["Tracking details"]));
+     main.append(renderEditForm());
+     main.append(h("h2", { class: "section-title" }, ["Notes"]));
+@@ -113,6 +116,132 @@ export async function renderApplicationDetail(root: HTMLElement, applicationId:
+     }
+   }
+ 
++  const ATS_ERROR_MESSAGES: Record<string, string> = {
++    external_ats_submission_disabled: "Auto-submit isn't enabled on this server yet.",
++    unsupported_ats: "This posting isn't hosted on Lever — auto-submit currently only supports Lever-hosted postings.",
++    resume_missing_file: "The resume attached to this application has no uploaded file — attach a document to it under Resumes first.",
++    no_resume_selected: "This application has no resume selected — pick one under Tracking details first.",
++    personal_info_incomplete: "Your legal name and email need to be filled in under Profile before auto-submitting.",
++    opportunity_closed: "This posting is no longer open on Lever.",
++    opportunity_missing_application_url: "This opportunity has no application link on file.",
++    application_not_eligible_for_submission: "This application has already moved past SAVED/APPLYING — auto-submit only applies before that.",
++    ats_posting_unavailable: "Couldn't reach Lever to confirm this posting is still live.",
++    resume_file_unavailable: "Couldn't retrieve the resume file to attach.",
++    resume_file_download_failed: "Couldn't download the resume file to attach.",
++    ats_submission_failed: "Lever rejected the submission",
++  };
++
++  function renderAtsSection(): HTMLElement {
++    const eligible = application.status === "SAVED" || application.status === "APPLYING";
++    const alreadySubmitted = Boolean(application.ats_submitted_at);
++    if (!eligible && !alreadySubmitted) return h("div", {}, []);
++
++    const body = h("div", {}, []);
++
++    if (alreadySubmitted) {
++      body.append(
++        h("div", { class: "list-row__meta" }, [
++          `Submitted via ${application.ats_provider ?? "an external ATS"} on ${formatDate(application.ats_submitted_at!)}.`,
++        ]),
++      );
++    }
++    if (!eligible) {
++      return h("div", { class: "card" }, [body]);
++    }
++
++    if (application.ats_submission_error) {
++      body.append(h("div", { class: "form-error" }, [`Last attempt failed: ${application.ats_submission_error}`]));
++    }
++
++    const previewArea = h("div", { style: "margin-top:10px" }, []);
++
++    const previewBtn = h(
++      "button",
++      {
++        class: "btn btn--small",
++        onClick: async () => {
++          previewBtn.setAttribute("disabled", "");
++          previewArea.innerHTML = "";
++          previewArea.append(h("div", { class: "subtle" }, ["Checking the posting on Lever…"]));
++          const result = await submitApplicationToAts(application.id, { dry_run: true });
++          previewBtn.removeAttribute("disabled");
++          previewArea.innerHTML = "";
++          if (!result.ok) {
++            previewArea.append(h("div", { class: "form-error" }, [ATS_ERROR_MESSAGES[result.error] ?? result.message ?? result.error]));
++            return;
++          }
++          if (!result.dry_run) {
++            // Can't actually happen (this call always passes dry_run: true),
++            // but keeps the branch exhaustive for the type checker.
++            return;
++          }
++          previewArea.append(renderDryRunPreview(result.would_submit));
++        },
++      },
++      ["Preview auto-submit"],
++    );
++
++    body.append(
++      h("div", {}, [
++        h("div", { class: "subtle", style: "margin-bottom:8px" }, [
++          "Auto-submit this application through the employer's ATS, where supported (currently: Lever-hosted postings only, base fields only — no custom screening questions).",
++        ]),
++        h("div", { class: "btn-row" }, [previewBtn]),
++        previewArea,
++      ]),
++    );
++
++    return h("div", { class: "card" }, [body]);
++  }
++
++  function renderDryRunPreview(wouldSubmit: AtsSubmitDryRunResult["would_submit"]): HTMLElement {
++    const submitBtn = h(
++      "button",
++      {
++        class: "btn btn--primary btn--small",
++        onClick: async () => {
++          if (!confirm(`Submit this application to "${wouldSubmit.posting_title}" on Lever now? This sends a real application to the employer and can't be undone.`)) {
++            return;
++          }
++          submitBtn.setAttribute("disabled", "");
++          try {
++            const result = await submitApplicationToAts(application.id, { dry_run: false });
++            if (!result.ok) {
++              toast(ATS_ERROR_MESSAGES[result.error] ?? result.message ?? result.error, "error");
++              submitBtn.removeAttribute("disabled");
++              return;
++            }
++            if (result.dry_run) {
++              // Can't actually happen (this call always passes dry_run: false),
++              // but keeps the branch exhaustive for the type checker.
++              submitBtn.removeAttribute("disabled");
++              return;
++            }
++            application = result.application;
++            const historyResult = await getApplication(application.id);
++            history = historyResult.status_history;
++            toast("Submitted to Lever.");
++            draw();
++          } catch (err) {
++            toast(errorMessage(err), "error");
++            submitBtn.removeAttribute("disabled");
++          }
++        },
++      },
++      ["Submit for real"],
++    );
++
++    return h("div", { class: "card", style: "background:var(--surface-2,#f7f7f7)" }, [
++      h("div", { style: "margin-bottom:6px" }, [`Would submit to: ${wouldSubmit.posting_title} (Lever)`]),
++      h("div", { class: "list-row__meta" }, [
++        [`Name: ${wouldSubmit.name}`, `Email: ${wouldSubmit.email}`, wouldSubmit.phone ? `Phone: ${wouldSubmit.phone}` : null, `Resume: ${wouldSubmit.resume_title}`]
++          .filter(Boolean)
++          .join(" · "),
++      ]),
++      h("div", { class: "btn-row", style: "margin-top:10px" }, [submitBtn]),
++    ]);
++  }
++
+   function renderOpportunityCard(): HTMLElement {
+     const o = application.opportunity;
+     if (!o) return h("div", {}, []);

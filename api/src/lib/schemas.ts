@@ -427,3 +427,17 @@ export const ApplicationNoteRequestSchema = z.object({
   content: z.string().trim().min(1),
 });
 export type ApplicationNoteRequest = z.infer<typeof ApplicationNoteRequestSchema>;
+
+// ── Gate R8 — external ATS submission ────────────────────────────────────
+// dry_run defaults to true — a request body with the field simply omitted
+// (the common case for a first try, or a client that hasn't been updated
+// to think carefully about this) NEVER accidentally submits for real.
+// Only an explicit `dry_run: false` performs the live submission. See
+// application.ts's POST /applications/:id/submit-to-ats for the full
+// safety posture (this is one of two independent layers — the other is
+// env.ts's EXTERNAL_ATS_SUBMISSION_ENABLED server-side kill switch).
+export const ApplicationSubmitToAtsRequestSchema = z.object({
+  dry_run: z.boolean().optional().default(true),
+  comments: z.string().trim().max(4000).optional(),
+});
+export type ApplicationSubmitToAtsRequest = z.infer<typeof ApplicationSubmitToAtsRequestSchema>;

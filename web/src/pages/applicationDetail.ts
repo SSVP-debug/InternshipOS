@@ -7,11 +7,13 @@ import {
   addApplicationNote,
   updateApplicationNote,
   deleteApplicationNote,
+  submitApplicationToAts,
   ApiError,
   type Application,
   type ApplicationStatus,
   type ApplicationStatusEvent,
   type ApplicationNote,
+  type AtsSubmitDryRunResult,
 } from "../lib/api";
 
 const TRANSITIONS: Record<ApplicationStatus, ApplicationStatus[]> = {
@@ -67,6 +69,7 @@ export async function renderApplicationDetail(root: HTMLElement, applicationId: 
 
     main.append(renderTransitionBar());
     main.append(renderOpportunityCard());
+    main.append(renderAtsSection());
     main.append(h("h2", { class: "section-title" }, ["Tracking details"]));
     main.append(renderEditForm());
     main.append(h("h2", { class: "section-title" }, ["Notes"]));
@@ -111,6 +114,132 @@ export async function renderApplicationDetail(root: HTMLElement, applicationId: 
     } catch (err) {
       toast(errorMessage(err), "error");
     }
+  }
+
+  const ATS_ERROR_MESSAGES: Record<string, string> = {
+    external_ats_submission_disabled: "Auto-submit isn't enabled on this server yet.",
+    unsupported_ats: "This posting isn't hosted on Lever — auto-submit currently only supports Lever-hosted postings.",
+    resume_missing_file: "The resume attached to this application has no uploaded file — attach a document to it under Resumes first.",
+    no_resume_selected: "This application has no resume selected — pick one under Tracking details first.",
+    personal_info_incomplete: "Your legal name and email need to be filled in under Profile before auto-submitting.",
+    opportunity_closed: "This posting is no longer open on Lever.",
+    opportunity_missing_application_url: "This opportunity has no application link on file.",
+    application_not_eligible_for_submission: "This application has already moved past SAVED/APPLYING — auto-submit only applies before that.",
+    ats_posting_unavailable: "Couldn't reach Lever to confirm this posting is still live.",
+    resume_file_unavailable: "Couldn't retrieve the resume file to attach.",
+    resume_file_download_failed: "Couldn't download the resume file to attach.",
+    ats_submission_failed: "Lever rejected the submission",
+  };
+
+  function renderAtsSection(): HTMLElement {
+    const eligible = application.status === "SAVED" || application.status === "APPLYING";
+    const alreadySubmitted = Boolean(application.ats_submitted_at);
+    if (!eligible && !alreadySubmitted) return h("div", {}, []);
+
+    const body = h("div", {}, []);
+
+    if (alreadySubmitted) {
+      body.append(
+        h("div", { class: "list-row__meta" }, [
+          `Submitted via ${application.ats_provider ?? "an external ATS"} on ${formatDate(application.ats_submitted_at!)}.`,
+        ]),
+      );
+    }
+    if (!eligible) {
+      return h("div", { class: "card" }, [body]);
+    }
+
+    if (application.ats_submission_error) {
+      body.append(h("div", { class: "form-error" }, [`Last attempt failed: ${application.ats_submission_error}`]));
+    }
+
+    const previewArea = h("div", { style: "margin-top:10px" }, []);
+
+    const previewBtn = h(
+      "button",
+      {
+        class: "btn btn--small",
+        onClick: async () => {
+          previewBtn.setAttribute("disabled", "");
+          previewArea.innerHTML = "";
+          previewArea.append(h("div", { class: "subtle" }, ["Checking the posting on Lever…"]));
+          const result = await submitApplicationToAts(application.id, { dry_run: true });
+          previewBtn.removeAttribute("disabled");
+          previewArea.innerHTML = "";
+          if (!result.ok) {
+            previewArea.append(h("div", { class: "form-error" }, [ATS_ERROR_MESSAGES[result.error] ?? result.message ?? result.error]));
+            return;
+          }
+          if (!result.dry_run) {
+            // Can't actually happen (this call always passes dry_run: true),
+            // but keeps the branch exhaustive for the type checker.
+            return;
+          }
+          previewArea.append(renderDryRunPreview(result.would_submit));
+        },
+      },
+      ["Preview auto-submit"],
+    );
+
+    body.append(
+      h("div", {}, [
+        h("div", { class: "subtle", style: "margin-bottom:8px" }, [
+          "Auto-submit this application through the employer's ATS, where supported (currently: Lever-hosted postings only, base fields only — no custom screening questions).",
+        ]),
+        h("div", { class: "btn-row" }, [previewBtn]),
+        previewArea,
+      ]),
+    );
+
+    return h("div", { class: "card" }, [body]);
+  }
+
+  function renderDryRunPreview(wouldSubmit: AtsSubmitDryRunResult["would_submit"]): HTMLElement {
+    const submitBtn = h(
+      "button",
+      {
+        class: "btn btn--primary btn--small",
+        onClick: async () => {
+          if (!confirm(`Submit this application to "${wouldSubmit.posting_title}" on Lever now? This sends a real application to the employer and can't be undone.`)) {
+            return;
+          }
+          submitBtn.setAttribute("disabled", "");
+          try {
+            const result = await submitApplicationToAts(application.id, { dry_run: false });
+            if (!result.ok) {
+              toast(ATS_ERROR_MESSAGES[result.error] ?? result.message ?? result.error, "error");
+              submitBtn.removeAttribute("disabled");
+              return;
+            }
+            if (result.dry_run) {
+              // Can't actually happen (this call always passes dry_run: false),
+              // but keeps the branch exhaustive for the type checker.
+              submitBtn.removeAttribute("disabled");
+              return;
+            }
+            application = result.application;
+            const historyResult = await getApplication(application.id);
+            history = historyResult.status_history;
+            toast("Submitted to Lever.");
+            draw();
+          } catch (err) {
+            toast(errorMessage(err), "error");
+            submitBtn.removeAttribute("disabled");
+          }
+        },
+      },
+      ["Submit for real"],
+    );
+
+    return h("div", { class: "card", style: "background:var(--surface-2,#f7f7f7)" }, [
+      h("div", { style: "margin-bottom:6px" }, [`Would submit to: ${wouldSubmit.posting_title} (Lever)`]),
+      h("div", { class: "list-row__meta" }, [
+        [`Name: ${wouldSubmit.name}`, `Email: ${wouldSubmit.email}`, wouldSubmit.phone ? `Phone: ${wouldSubmit.phone}` : null, `Resume: ${wouldSubmit.resume_title}`]
+          .filter(Boolean)
+          .join(" · "),
+      ]),
+      h("div", { class: "btn-row", style: "margin-top:10px" }, [submitBtn]),
+    ]);
   }
 
   function renderOpportunityCard(): HTMLElement {

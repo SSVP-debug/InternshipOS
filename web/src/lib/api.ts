@@ -479,6 +479,14 @@ export interface Application {
   // so callers narrow with `"evidence_source_id" in application.resume`
   // when they specifically need the file id (see applicationDetail.ts).
   resume?: ApplicationResumeSummary | ApplicationResumeDetail | null;
+  // Gate R8 — set only by a successful (dry_run: false)
+  // POST /applications/:id/submit-to-ats. All null until that's been
+  // tried at least once; ats_submission_error reflects only the most
+  // recent attempt (not an append-only log — see 0030's migration).
+  ats_provider?: string | null;
+  ats_external_id?: string | null;
+  ats_submitted_at?: string | null;
+  ats_submission_error?: string | null;
 }
 export interface ApplicationStatusEvent {
   id: string;
@@ -517,6 +525,87 @@ export const updateApplication = (
 ) => put<{ application: Application }>(`/applications/${id}`, data).then((b) => b.application);
 export const setApplicationStatus = (id: string, status: ApplicationStatus, note?: string) =>
   patch<{ application: Application }>(`/applications/${id}/status`, { status, note }).then((b) => b.application);
+
+// Gate R8 — see api/src/routes/application.ts's own comment and
+// docs/gate-r8-lever-ats-submission.md for the full behavior/limits.
+// Returns a union rather than throwing on the "not eligible yet"
+// outcomes (unsupported ATS, missing resume file, etc.) — those are
+// expected, common results for most of a candidate's feed (only
+// Lever-hosted postings qualify at all), not exceptional failures, so
+// callers are expected to branch on `ok` rather than wrap this in
+// try/catch the way every other mutating call in this file is used.
+// A genuine network/server error (5xx, invalid JSON, no auth) still
+// throws ApiError like every other function here — only the specific,
+// documented 422/403/409 "can't do this" responses are folded into the
+// return value instead.
+export interface AtsSubmitDryRunResult {
+  ok: true;
+  dry_run: true;
+  would_submit: {
+    site: string;
+    posting_id: string;
+    posting_title: string;
+    name: string;
+    email: string;
+    phone?: string;
+    comments?: string;
+    resume_title: string;
+  };
+}
+export interface AtsSubmitSuccessResult {
+  ok: true;
+  dry_run: false;
+  application: Application;
+}
+export interface AtsSubmitRejectedResult {
+  ok: false;
+  error: string;
+  message?: string;
+}
+export type AtsSubmitResult = AtsSubmitDryRunResult | AtsSubmitSuccessResult | AtsSubmitRejectedResult;
+
+const ATS_REJECTION_CODES = new Set([
+  "external_ats_submission_disabled",
+  "invalid_id",
+  "invalid_request",
+  "candidate_not_found",
+  "application_not_found",
+  "application_not_eligible_for_submission",
+  "no_resume_selected",
+  "opportunity_missing_application_url",
+  "unsupported_ats",
+  "resume_missing_file",
+  "personal_info_incomplete",
+  "ats_posting_unavailable",
+  "opportunity_closed",
+  "resume_file_unavailable",
+  "resume_file_download_failed",
+  "ats_submission_failed",
+]);
+
+export async function submitApplicationToAts(id: string, options: { dry_run: boolean; comments?: string }): Promise<AtsSubmitResult> {
+  try {
+    const body = await post<{ dry_run?: boolean; would_submit?: AtsSubmitDryRunResult["would_submit"]; submitted?: boolean; application?: Application }>(
+      `/applications/${id}/submit-to-ats`,
+      options,
+    );
+    if (body.dry_run && body.would_submit) {
+      return { ok: true, dry_run: true, would_submit: body.would_submit };
+    }
+    if (body.submitted && body.application) {
+      return { ok: true, dry_run: false, application: body.application };
+    }
+    // Shouldn't happen against a well-behaved backend, but surfacing this
+    // as a rejection (rather than throwing) keeps the caller's rendering
+    // logic simple — every non-throw path is "check ok, branch on shape".
+    return { ok: false, error: "unexpected_response", message: "Server response didn't match either expected shape." };
+  } catch (err) {
+    if (err instanceof ApiError && ATS_REJECTION_CODES.has(err.code)) {
+      return { ok: false, error: err.code, message: err.message };
+    }
+    throw err;
+  }
+}
 
 export const listApplicationNotes = (applicationId: string) =>
   get<{ notes: ApplicationNote[] }>(`/applications/${applicationId}/notes`).then((b) => b.notes);

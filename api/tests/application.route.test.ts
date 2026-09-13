@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import type { Response } from "express";
 import type { AuthedRequest } from "../src/middleware/auth.js";
+import type { Env } from "../src/lib/env.js";
 import { applicationRouter } from "../src/routes/application.js";
 
 interface RouteLayer {
@@ -11,8 +12,27 @@ interface RouteLayer {
   };
 }
 
-function getHandlers(method: "get" | "post" | "put" | "patch", path: string) {
-  const router = applicationRouter() as unknown as { stack: RouteLayer[] };
+// Gate R8: applicationRouter now takes env (for the submit-to-ats kill
+// switch). Every pre-existing test in this file is unaffected by the
+// flag's value — only the new "POST /applications/:id/submit-to-ats"
+// describe block below cares — so this default just needs to be *a*
+// valid Env, with the flag on so those new tests can reach past the
+// switch and exercise the route's own logic; the flag-off 403 case gets
+// its own explicit override.
+const TEST_ENV: Env = {
+  SUPABASE_URL: "https://example.supabase.co",
+  SUPABASE_ANON_KEY: "anon-key",
+  SUPABASE_SERVICE_ROLE_KEY: "service-role-key",
+  PORT: 3000,
+  CONSENT_POLICY_VERSION: "v1.0",
+  NODE_ENV: "test",
+  RATE_LIMIT_WINDOW_MINUTES: 15,
+  SIGNUP_RATE_LIMIT_MAX: 5,
+  EXTERNAL_ATS_SUBMISSION_ENABLED: true,
+};
+
+function getHandlers(method: "get" | "post" | "put" | "patch", path: string, env: Env = TEST_ENV) {
+  const router = applicationRouter(env) as unknown as { stack: RouteLayer[] };
   const layer = router.stack.find((l) => l.route?.path === path && l.route?.methods[method]);
   if (!layer?.route) throw new Error(`no route registered for ${method.toUpperCase()} ${path}`);
   return layer.route.stack.map((s) => s.handle);

@@ -42,6 +42,26 @@ const EnvSchema = z.object({
   // see that file's header comment for why signup specifically gets its
   // own, stricter limit.
   SIGNUP_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(5),
+
+  // Gate R8 — kill switch for POST /applications/:id/submit-to-ats
+  // (api/src/lib/ats/leverAdapter.ts). Off by default: this route sends a
+  // real application to a real employer on the candidate's behalf, unlike
+  // every other route in this codebase, which only ever touches this
+  // candidate's own tracking data. Defaulting to false means a fresh
+  // deploy (or a forgotten env var) never accidentally exposes live
+  // external submission. Per-request dry_run defaults still apply on top
+  // of this flag — see that route's own comment for the two-layer
+  // reasoning.
+  //
+  // Deliberately NOT z.coerce.boolean(): zod's coercion runs the string
+  // through JS's Boolean(), where Boolean("false") is true — setting
+  // EXTERNAL_ATS_SUBMISSION_ENABLED=false in an env file would silently
+  // turn the flag ON under z.coerce.boolean(). An explicit string enum +
+  // transform avoids that trap entirely.
+  EXTERNAL_ATS_SUBMISSION_ENABLED: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((v) => v === "true"),
 });
 
 export type Env = z.infer<typeof EnvSchema>;

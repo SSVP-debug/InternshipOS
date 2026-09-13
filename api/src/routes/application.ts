@@ -13,6 +13,25 @@
 //                                    same request (see 0019's migration
 //                                    header for why this is done at the API
 //                                    layer, not a DB trigger)
+// POST  /applications/:id/submit-to-ats — Gate R8: actually submits the
+//                                    application to the employer, through
+//                                    Lever's public postings-apply
+//                                    endpoint ONLY (see leverAdapter.ts's
+//                                    header for why Lever specifically).
+//                                    Two independent safety layers gate
+//                                    this: env.EXTERNAL_ATS_SUBMISSION_ENABLED
+//                                    (server-wide kill switch, default
+//                                    off) and the request body's dry_run
+//                                    (default true — a dry run validates
+//                                    everything and reports what WOULD be
+//                                    sent, without ever calling Lever).
+//                                    On a real (dry_run: false) success,
+//                                    advances status through
+//                                    APPLYING -> APPLIED (writing the same
+//                                    application_status_event history PATCH
+//                                    /status writes) and records
+//                                    ats_provider/ats_external_id/
+//                                    ats_submitted_at (0030's migration).
 //
 // No DELETE route — see 0018_application.sql's header: WITHDRAWN is the
 // intended terminal state for "no longer pursuing this," preserving
@@ -34,16 +53,27 @@
 
 import { Router } from "express";
 import type { AuthedRequest } from "../middleware/auth.js";
+import type { Env } from "../lib/env.js";
 import {
   ApplicationCreateRequestSchema,
   ApplicationUpdateRequestSchema,
   ApplicationStatusTransitionSchema,
+  ApplicationSubmitToAtsRequestSchema,
   UuidParamSchema,
 } from "../lib/schemas.js";
+import { parseLeverPostingUrl, getLeverPosting, submitLeverApplication } from "../lib/ats/leverAdapter.js";
+
+const EVIDENCE_BUCKET = "evidence-documents";
+const DOWNLOAD_URL_EXPIRY_SECONDS = 60; // short-lived — used immediately, server-side, never returned to a client
 
 const APPLICATION_COLUMNS =
   "id, opportunity_id, resume_id, status, applied_at, deadline_override, next_action_date, " +
-  "next_action_note, recruiter_name, recruiter_email, created_at, updated_at";
+  "next_action_note, recruiter_name, recruiter_email, created_at, updated_at, " +
+  // Gate R8 — without these, GET /applications and GET /applications/:id
+  // would never surface whether/how an application was auto-submitted,
+  // and submit-to-ats's own success response (built from this same
+  // constant) would silently omit the very fields it just wrote.
+  "ats_provider, ats_external_id, ats_submitted_at, ats_submission_error";
 
 const OPPORTUNITY_SUMMARY_COLUMNS =
   "id, title, company, location, work_mode, application_url, deadline_date";
@@ -82,6 +112,11 @@ interface ApplicationDbRow {
   recruiter_email: string | null;
   created_at: string;
   updated_at: string;
+  // Gate R8
+  ats_provider: string | null;
+  ats_external_id: string | null;
+  ats_submitted_at: string | null;
+  ats_submission_error: string | null;
 }
 
 interface OpportunitySummaryDbRow {
@@ -112,7 +147,7 @@ async function getOwnCandidateId(req: AuthedRequest): Promise<string | null> {
   return data.id as string;
 }
 
-export function applicationRouter(): Router {
+export function applicationRouter(env: Env): Router {
   const router = Router();
 
   router.get("/applications", async (req: AuthedRequest, res) => {
@@ -442,6 +477,251 @@ export function applicationRouter(): Router {
     }
 
     return res.status(200).json({ application: data });
+  });
+
+  // Gate R8 — see this file's header comment and leverAdapter.ts's header
+  // for the full scope/safety reasoning. Every failure branch below
+  // returns before calling Lever — nothing here calls submitLeverApplication
+  // except the single call at the very end, after every precondition and
+  // (for a real, non-dry-run attempt) the live posting check have passed.
+  router.post("/applications/:id/submit-to-ats", async (req: AuthedRequest, res) => {
+    if (!env.EXTERNAL_ATS_SUBMISSION_ENABLED) {
+      return res.status(403).json({
+        error: "external_ats_submission_disabled",
+        message: "External ATS submission is disabled on this server (EXTERNAL_ATS_SUBMISSION_ENABLED is not set).",
+      });
+    }
+
+    const idParsed = UuidParamSchema.safeParse(req.params.id);
+    if (!idParsed.success) {
+      return res.status(400).json({ error: "invalid_id" });
+    }
+    const bodyParsed = ApplicationSubmitToAtsRequestSchema.safeParse(req.body ?? {});
+    if (!bodyParsed.success) {
+      return res.status(400).json({ error: "invalid_request", details: bodyParsed.error.flatten() });
+    }
+    const { dry_run, comments } = bodyParsed.data;
+
+    const supabase = req.supabase!;
+    const candidateId = await getOwnCandidateId(req);
+    if (!candidateId) {
+      return res.status(404).json({ error: "candidate_not_found" });
+    }
+
+    const { data: applicationRaw, error: applicationError } = await supabase
+      .from("application")
+      .select("id, status, resume_id, opportunity_id")
+      .eq("id", idParsed.data)
+      .maybeSingle();
+    if (applicationError) {
+      return res.status(400).json({ error: "application_fetch_failed", message: applicationError.message });
+    }
+    if (!applicationRaw) {
+      return res.status(404).json({ error: "application_not_found" });
+    }
+    const application = applicationRaw as unknown as Pick<ApplicationDbRow, "id" | "status" | "resume_id" | "opportunity_id">;
+
+    // Only SAVED or APPLYING may proceed — anything further along has
+    // (per this application's own status history) already been submitted
+    // or is past that point (REJECTED/OFFER/WITHDRAWN), and re-submitting
+    // to the employer a second time is never the right default behavior.
+    // A candidate who genuinely needs to resubmit can still do the whole
+    // thing manually via "Open listing" — this route only ever guards its
+    // own automated path, not the manual one.
+    if (application.status !== "SAVED" && application.status !== "APPLYING") {
+      return res.status(409).json({
+        error: "application_not_eligible_for_submission",
+        message: `Application status is ${application.status}; only SAVED or APPLYING applications can be auto-submitted.`,
+      });
+    }
+
+    if (!application.resume_id) {
+      return res.status(422).json({ error: "no_resume_selected", message: "This application has no resume_id set." });
+    }
+
+    const [opportunityResult, resumeResult, personalInfoResult] = await Promise.all([
+      supabase.from("opportunity").select("id, application_url").eq("id", application.opportunity_id).maybeSingle(),
+      supabase.from("resume").select("id, evidence_source_id").eq("id", application.resume_id).maybeSingle(),
+      supabase
+        .from("personal_info")
+        .select("legal_first_name, legal_last_name, email, phone")
+        .maybeSingle(),
+    ]);
+    if (opportunityResult.error || resumeResult.error || personalInfoResult.error) {
+      const firstError = opportunityResult.error ?? resumeResult.error ?? personalInfoResult.error;
+      return res.status(400).json({ error: "application_fetch_failed", message: firstError!.message });
+    }
+
+    const opportunity = opportunityResult.data as { id: string; application_url: string | null } | null;
+    if (!opportunity?.application_url) {
+      return res.status(422).json({ error: "opportunity_missing_application_url" });
+    }
+
+    const leverRef = parseLeverPostingUrl(opportunity.application_url);
+    if (!leverRef) {
+      return res.status(422).json({
+        error: "unsupported_ats",
+        message: "Auto-submission currently only supports Lever-hosted postings (jobs.lever.co/...).",
+      });
+    }
+
+    const resume = resumeResult.data as { id: string; evidence_source_id: string | null } | null;
+    if (!resume?.evidence_source_id) {
+      return res.status(422).json({
+        error: "resume_missing_file",
+        message: "The selected resume has no attached document — nothing to submit as a resume file.",
+      });
+    }
+
+    const { data: evidenceSourceRaw, error: evidenceSourceError } = await supabase
+      .from("evidence_source")
+      .select("source_type, file_ref, title")
+      .eq("id", resume.evidence_source_id)
+      .maybeSingle();
+    if (evidenceSourceError) {
+      return res.status(400).json({ error: "application_fetch_failed", message: evidenceSourceError.message });
+    }
+    const evidenceSource = evidenceSourceRaw as { source_type: string; file_ref: string | null; title: string } | null;
+    if (!evidenceSource || evidenceSource.source_type !== "document_upload" || !evidenceSource.file_ref) {
+      return res.status(422).json({
+        error: "resume_missing_file",
+        message: "The selected resume's evidence source is not an uploaded document.",
+      });
+    }
+
+    const personalInfo = personalInfoResult.data as
+      | { legal_first_name: string; legal_last_name: string; email: string; phone: string | null }
+      | null;
+    if (!personalInfo?.legal_first_name || !personalInfo.legal_last_name || !personalInfo.email) {
+      return res.status(422).json({
+        error: "personal_info_incomplete",
+        message: "Legal name and email must be filled in under Profile before auto-submitting an application.",
+      });
+    }
+
+    const postingResult = await getLeverPosting(leverRef);
+    if (!postingResult.ok) {
+      return res.status(422).json({
+        error: "ats_posting_unavailable",
+        message: postingResult.message,
+      });
+    }
+    if (postingResult.posting.state !== "published") {
+      return res.status(422).json({
+        error: "opportunity_closed",
+        message: `This posting's current state on Lever is "${postingResult.posting.state}", not "published".`,
+      });
+    }
+
+    const wouldSubmit = {
+      site: leverRef.site,
+      posting_id: leverRef.postingId,
+      posting_title: postingResult.posting.text,
+      name: `${personalInfo.legal_first_name} ${personalInfo.legal_last_name}`,
+      email: personalInfo.email,
+      phone: personalInfo.phone ?? undefined,
+      comments: comments ?? undefined,
+      resume_title: evidenceSource.title,
+    };
+
+    if (dry_run) {
+      return res.status(200).json({ dry_run: true, would_submit: wouldSubmit });
+    }
+
+    // Real submission from here on. Fetch the resume file's bytes via a
+    // short-lived signed URL — same storage/RLS pattern as GET
+    // /evidence-sources/:id/download-url, just consumed server-side
+    // instead of handed to a client.
+    const { data: signedUrlData, error: signedUrlError } = await supabase.storage
+      .from(EVIDENCE_BUCKET)
+      .createSignedUrl(evidenceSource.file_ref, DOWNLOAD_URL_EXPIRY_SECONDS);
+    if (signedUrlError || !signedUrlData) {
+      return res.status(502).json({
+        error: "resume_file_unavailable",
+        message: signedUrlError?.message ?? "Could not create a signed URL for the resume file.",
+      });
+    }
+
+    let resumeBytes: ArrayBuffer;
+    let resumeContentType: string;
+    try {
+      const fileResponse = await fetch(signedUrlData.signedUrl);
+      if (!fileResponse.ok) {
+        throw new Error(`storage download returned ${fileResponse.status}`);
+      }
+      resumeBytes = await fileResponse.arrayBuffer();
+      resumeContentType = fileResponse.headers.get("content-type") ?? "application/octet-stream";
+    } catch (err) {
+      return res.status(502).json({
+        error: "resume_file_download_failed",
+        message: err instanceof Error ? err.message : "unknown error downloading resume file",
+      });
+    }
+
+    const filename = evidenceSource.file_ref.split("/").pop() ?? "resume";
+    const submitResult = await submitLeverApplication(leverRef, {
+      name: wouldSubmit.name,
+      email: wouldSubmit.email,
+      phone: wouldSubmit.phone,
+      comments: wouldSubmit.comments,
+      resumeFile: { bytes: resumeBytes, filename, contentType: resumeContentType },
+    });
+
+    if (!submitResult.ok) {
+      await supabase.from("application").update({ ats_submission_error: submitResult.message }).eq("id", application.id);
+      return res.status(502).json({ error: "ats_submission_failed", message: submitResult.message });
+    }
+
+    // Success: advance the status machine to APPLIED, going through
+    // APPLYING first if this application was still SAVED — the DB
+    // trigger (0018_application.sql's check_application_status_transition)
+    // does not allow SAVED -> APPLIED directly, same rule PATCH /status is
+    // already subject to. Each hop writes its own application_status_event,
+    // same convention as PATCH /status.
+    let currentStatus = application.status;
+    if (currentStatus === "SAVED") {
+      await supabase.from("application").update({ status: "APPLYING" }).eq("id", application.id);
+      await supabase.from("application_status_event").insert({
+        application_id: application.id,
+        candidate_id: candidateId,
+        from_status: "SAVED",
+        to_status: "APPLYING",
+        note: "Auto-advanced by submit-to-ats before external submission.",
+      });
+      currentStatus = "APPLYING";
+    }
+
+    const { data: finalRaw, error: finalError } = await supabase
+      .from("application")
+      .update({
+        status: "APPLIED",
+        ats_provider: "lever",
+        ats_submitted_at: new Date().toISOString(),
+        ats_submission_error: null,
+      })
+      .eq("id", application.id)
+      .select(APPLICATION_COLUMNS)
+      .maybeSingle();
+    if (finalError || !finalRaw) {
+      // The submission to Lever already succeeded — this failure is only
+      // our own tracking update, so it must not be reported as a failed
+      // submission (that would risk a caller retrying and double-applying).
+      return res.status(200).json({
+        submitted: true,
+        warning: "Application was submitted to Lever successfully, but updating this application's tracked status failed.",
+        message: finalError?.message,
+      });
+    }
+
+    await supabase.from("application_status_event").insert({
+      application_id: application.id,
+      candidate_id: candidateId,
+      from_status: currentStatus,
+      to_status: "APPLIED",
+      note: "Submitted via Lever (submit-to-ats).",
+    });
+
+    return res.status(200).json({ submitted: true, application: finalRaw });
   });
 
   return router;

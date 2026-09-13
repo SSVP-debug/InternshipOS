@@ -163,7 +163,7 @@ export function createApp(env: Env): Express {
   app.use(requireAuth(env), todayRouter());
   app.use(requireAuth(env), opportunityRouter());
   app.use(requireAuth(env), opportunityFeedRouter());
-  app.use(requireAuth(env), applicationRouter());
+  app.use(requireAuth(env), applicationRouter(env));
   app.use(requireAuth(env), applicationNoteRouter());
   app.use(requireAuth(env), resumeRouter());
 
