@@ -774,6 +774,15 @@ export interface OpportunityFeedItem {
   // deadline. Used by lib/dailyQueue.ts (frontend) to render the
   // "opportunity_deadline" queue reason; not otherwise interpreted here.
   deadline_date: string | null;
+  // Gate R8 follow-up — only ever non-null once promoted_opportunity_id
+  // is set AND that application has a successful (dry_run: false)
+  // submit-to-ats behind it. Lets pages/opportunityFeed.ts show "already
+  // submitted via Lever" correctly even after a page reload, instead of
+  // relying only on the current session's own in-memory state (see that
+  // file's autoAppliedIds comment for why the session-only tracking
+  // alone wasn't enough).
+  ats_provider: string | null;
+  ats_submitted_at: string | null;
 }
 // Gate R3: a lightweight per-active-resume summary, always present
 // (empty array for a candidate with no active resumes) — see

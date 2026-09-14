@@ -382,6 +382,59 @@ index f37d9f9..171e450 100644
 +
    return router;
  }
+diff --git a/api/src/routes/opportunity-feed.ts b/api/src/routes/opportunity-feed.ts
+index 8c78534..4b62bdd 100644
+--- a/api/src/routes/opportunity-feed.ts
++++ b/api/src/routes/opportunity-feed.ts
+@@ -574,9 +574,47 @@ export function opportunityFeedRouter(): Router {
+ 
+     const items = buildOpportunityFeed(matches, sources);
+ 
++    // Gate R8 follow-up — without this, the frontend's "Auto-apply
++    // (Lever)" button has no way to know a match was already
++    // auto-submitted on a previous visit (see
++    // pages/opportunityFeed.ts's own comment on its session-only
++    // autoAppliedIds Set for the UI-side half of this). Deliberately
++    // NOT added to buildOpportunityFeed() itself or OpportunityFeedItem
++    // in lib/opportunityFeed.ts — that function is also called by
++    // today.ts and dailyQueue.ts, and this enrichment only makes sense
++    // for the feed's own response, not those. Enriching the already-built
++    // items array here, after the fact, keeps the shared pure builder
++    // (and its two other callers) completely untouched.
++    const promotedIds = [...new Set(items.map((i) => i.promoted_opportunity_id).filter((id): id is string => id != null))];
++    let atsByOpportunityId = new Map<string, { ats_provider: string | null; ats_submitted_at: string | null }>();
++    if (promotedIds.length > 0) {
++      const { data: atsRows, error: atsError } = await supabase
++        .from("application")
++        .select("opportunity_id, ats_provider, ats_submitted_at")
++        .in("opportunity_id", promotedIds);
++      // Not fatal: this is a nice-to-have enrichment, not core feed data
++      // — if it fails, the feed itself still renders correctly, just
++      // without "already auto-submitted" badges (same posture as the
++      // promoted_opportunity_id write-back failure noted elsewhere in
++      // this file being non-fatal to the response that triggered it).
++      if (!atsError && atsRows) {
++        atsByOpportunityId = new Map(
++          (atsRows as unknown as Array<{ opportunity_id: string; ats_provider: string | null; ats_submitted_at: string | null }>).map((r) => [
++            r.opportunity_id,
++            { ats_provider: r.ats_provider, ats_submitted_at: r.ats_submitted_at },
++          ]),
++        );
++      }
++    }
++    const enrichedItems = items.map((item) => ({
++      ...item,
++      ats_provider: item.promoted_opportunity_id ? (atsByOpportunityId.get(item.promoted_opportunity_id)?.ats_provider ?? null) : null,
++      ats_submitted_at: item.promoted_opportunity_id ? (atsByOpportunityId.get(item.promoted_opportunity_id)?.ats_submitted_at ?? null) : null,
++    }));
++
+     return res.status(200).json({
+       generated_at: new Date().toISOString(),
+-      items,
++      items: enrichedItems,
+       resume_groups: resumeGroups,
+     });
+   });
 diff --git a/api/src/server.ts b/api/src/server.ts
 index 5ea2e7c..c41466e 100644
 --- a/api/src/server.ts
@@ -505,7 +558,7 @@ index b2c3082..f9608aa 100644
    });
  
 diff --git a/api/tests/opportunity-feed.route.test.ts b/api/tests/opportunity-feed.route.test.ts
-index 3352c10..362719b 100644
+index 3352c10..a86d37e 100644
 --- a/api/tests/opportunity-feed.route.test.ts
 +++ b/api/tests/opportunity-feed.route.test.ts
 @@ -74,7 +74,7 @@ function queryResult(data: unknown, error: { message: string; code?: string } |
@@ -517,7 +570,93 @@ index 3352c10..362719b 100644
  const SOURCE_ID = "source-1";
  
  const ACTIVE_SOURCE_ROW = {
-@@ -594,7 +594,7 @@ describe("PATCH /opportunity-matches/:id/inbox", () => {
+@@ -109,6 +109,8 @@ function makeSupabaseMock(opts: {
+   activeResumeList?: { data: unknown; error: { message: string } | null };
+   resumeOwnership?: { data: unknown; error: { message: string } | null };
+   resumeScopedMatchList?: { data: unknown; error: { message: string } | null };
++  // Gate R8 follow-up
++  applicationAtsList?: { data: unknown; error: { message: string } | null };
+ } = {}) {
+   const {
+     candidate = { id: CANDIDATE_ID },
+@@ -119,6 +121,7 @@ function makeSupabaseMock(opts: {
+     activeResumeList = { data: [], error: null },
+     resumeOwnership = { data: { id: "resume-1" }, error: null },
+     resumeScopedMatchList = { data: [], error: null },
++    applicationAtsList = { data: [], error: null },
+   } = opts;
+ 
+   const fromSpy = vi.fn();
+@@ -170,6 +173,11 @@ function makeSupabaseMock(opts: {
+         }),
+       };
+     }
++    // Gate R8 follow-up: the ats_provider/ats_submitted_at enrichment
++    // query, `.from("application").select(...).in("opportunity_id", ids)`.
++    if (table === "application") {
++      return { select: () => ({ in: () => queryResult(applicationAtsList.data, applicationAtsList.error) }) };
++    }
+     return queryResult([], null);
+   };
+ 
+@@ -479,6 +487,56 @@ describe("GET /opportunity-feed", () => {
+ 
+     expect(res.status).toHaveBeenCalledWith(400);
+   });
++
++  it("Gate R8: enriches an already-promoted match with its application's ats_provider/ats_submitted_at", async () => {
++    const OPPORTUNITY_ID = "owned-opportunity-1";
++    const supabase = makeSupabaseMock({
++      matchList: { data: [{ ...MATCH_ROW, promoted_opportunity_id: OPPORTUNITY_ID }], error: null },
++      applicationAtsList: {
++        data: [{ opportunity_id: OPPORTUNITY_ID, ats_provider: "lever", ats_submitted_at: "2026-09-10T12:00:00Z" }],
++        error: null,
++      },
++    });
++    const req = { supabase } as unknown as AuthedRequest;
++    const res = makeRes();
++
++    await runRoute(getHandlers("get", "/opportunity-feed"), req, res);
++
++    expect(res.status).toHaveBeenCalledWith(200);
++    const body = (res as unknown as { body: { items: Array<{ ats_provider: string | null; ats_submitted_at: string | null }> } }).body;
++    expect(body.items[0].ats_provider).toBe("lever");
++    expect(body.items[0].ats_submitted_at).toBe("2026-09-10T12:00:00Z");
++  });
++
++  it("Gate R8: never queries the application table when nothing is promoted yet", async () => {
++    const supabase = makeSupabaseMock(); // MATCH_ROW has no promoted_opportunity_id
++    const req = { supabase } as unknown as AuthedRequest;
++    const res = makeRes();
++
++    await runRoute(getHandlers("get", "/opportunity-feed"), req, res);
++
++    expect(res.status).toHaveBeenCalledWith(200);
++    expect(supabase.fromSpy).not.toHaveBeenCalledWith("application");
++  });
++
++  it("Gate R8: leaves ats_provider/ats_submitted_at null (never throws) when the enrichment query itself errors", async () => {
++    const OPPORTUNITY_ID = "owned-opportunity-1";
++    const supabase = makeSupabaseMock({
++      matchList: { data: [{ ...MATCH_ROW, promoted_opportunity_id: OPPORTUNITY_ID }], error: null },
++      applicationAtsList: { data: null, error: { message: "connection reset" } },
++    });
++    const req = { supabase } as unknown as AuthedRequest;
++    const res = makeRes();
++
++    await runRoute(getHandlers("get", "/opportunity-feed"), req, res);
++
++    // Deliberately still a 200 — see this enrichment's own comment in
++    // opportunity-feed.ts on why it's treated as non-fatal.
++    expect(res.status).toHaveBeenCalledWith(200);
++    const body = (res as unknown as { body: { items: Array<{ ats_provider: string | null; ats_submitted_at: string | null }> } }).body;
++    expect(body.items[0].ats_provider).toBeNull();
++    expect(body.items[0].ats_submitted_at).toBeNull();
++  });
+ });
+ 
+ describe("PATCH /opportunity-matches/:id/inbox", () => {
+@@ -594,7 +652,7 @@ describe("PATCH /opportunity-matches/:id/inbox", () => {
      expect(res.status).toHaveBeenCalledWith(400);
    });
  
@@ -526,7 +665,7 @@ index 3352c10..362719b 100644
  
    it("accepts promoted_opportunity_id alone (no inbox_status/is_priority required)", async () => {
      const supabase = makeSupabaseMock({
-@@ -681,11 +681,11 @@ describe("PATCH /opportunity-matches/:id/inbox", () => {
+@@ -681,11 +739,11 @@ describe("PATCH /opportunity-matches/:id/inbox", () => {
  
  // ── Gate R5: POST /opportunity-matches/bulk-apply ──────────────────────
  
@@ -610,7 +749,7 @@ index 0cd7705..db1ff4d 100644
  describe("ResumeCreateRequestSchema", () => {
    it("accepts a minimal valid record (label only)", () => {
 diff --git a/web/src/lib/api.ts b/web/src/lib/api.ts
-index edb4671..eaa48ad 100644
+index edb4671..4740709 100644
 --- a/web/src/lib/api.ts
 +++ b/web/src/lib/api.ts
 @@ -479,6 +479,14 @@ export interface Application {
@@ -716,11 +855,27 @@ index edb4671..eaa48ad 100644
  export const listApplicationNotes = (applicationId: string) =>
    get<{ notes: ApplicationNote[] }>(`/applications/${applicationId}/notes`).then((b) => b.notes);
  export const addApplicationNote = (
+@@ -685,6 +774,15 @@ export interface OpportunityFeedItem {
+   // deadline. Used by lib/dailyQueue.ts (frontend) to render the
+   // "opportunity_deadline" queue reason; not otherwise interpreted here.
+   deadline_date: string | null;
++  // Gate R8 follow-up — only ever non-null once promoted_opportunity_id
++  // is set AND that application has a successful (dry_run: false)
++  // submit-to-ats behind it. Lets pages/opportunityFeed.ts show "already
++  // submitted via Lever" correctly even after a page reload, instead of
++  // relying only on the current session's own in-memory state (see that
++  // file's autoAppliedIds comment for why the session-only tracking
++  // alone wasn't enough).
++  ats_provider: string | null;
++  ats_submitted_at: string | null;
+ }
+ // Gate R3: a lightweight per-active-resume summary, always present
+ // (empty array for a candidate with no active resumes) — see
 diff --git a/web/src/pages/applicationDetail.ts b/web/src/pages/applicationDetail.ts
-index 94e6a76..1a19d7d 100644
+index 94e6a76..373e073 100644
 --- a/web/src/pages/applicationDetail.ts
 +++ b/web/src/pages/applicationDetail.ts
-@@ -7,11 +7,13 @@ import {
+@@ -7,12 +7,15 @@ import {
    addApplicationNote,
    updateApplicationNote,
    deleteApplicationNote,
@@ -732,9 +887,11 @@ index 94e6a76..1a19d7d 100644
    type ApplicationNote,
 +  type AtsSubmitDryRunResult,
  } from "../lib/api";
++import { atsErrorMessage } from "../lib/ats";
  
  const TRANSITIONS: Record<ApplicationStatus, ApplicationStatus[]> = {
-@@ -67,6 +69,7 @@ export async function renderApplicationDetail(root: HTMLElement, applicationId:
+   SAVED: ["APPLYING", "WITHDRAWN"],
+@@ -67,6 +70,7 @@ export async function renderApplicationDetail(root: HTMLElement, applicationId:
  
      main.append(renderTransitionBar());
      main.append(renderOpportunityCard());
@@ -742,25 +899,10 @@ index 94e6a76..1a19d7d 100644
      main.append(h("h2", { class: "section-title" }, ["Tracking details"]));
      main.append(renderEditForm());
      main.append(h("h2", { class: "section-title" }, ["Notes"]));
-@@ -113,6 +116,132 @@ export async function renderApplicationDetail(root: HTMLElement, applicationId:
+@@ -113,6 +117,117 @@ export async function renderApplicationDetail(root: HTMLElement, applicationId:
      }
    }
  
-+  const ATS_ERROR_MESSAGES: Record<string, string> = {
-+    external_ats_submission_disabled: "Auto-submit isn't enabled on this server yet.",
-+    unsupported_ats: "This posting isn't hosted on Lever — auto-submit currently only supports Lever-hosted postings.",
-+    resume_missing_file: "The resume attached to this application has no uploaded file — attach a document to it under Resumes first.",
-+    no_resume_selected: "This application has no resume selected — pick one under Tracking details first.",
-+    personal_info_incomplete: "Your legal name and email need to be filled in under Profile before auto-submitting.",
-+    opportunity_closed: "This posting is no longer open on Lever.",
-+    opportunity_missing_application_url: "This opportunity has no application link on file.",
-+    application_not_eligible_for_submission: "This application has already moved past SAVED/APPLYING — auto-submit only applies before that.",
-+    ats_posting_unavailable: "Couldn't reach Lever to confirm this posting is still live.",
-+    resume_file_unavailable: "Couldn't retrieve the resume file to attach.",
-+    resume_file_download_failed: "Couldn't download the resume file to attach.",
-+    ats_submission_failed: "Lever rejected the submission",
-+  };
-+
 +  function renderAtsSection(): HTMLElement {
 +    const eligible = application.status === "SAVED" || application.status === "APPLYING";
 +    const alreadySubmitted = Boolean(application.ats_submitted_at);
@@ -797,7 +939,7 @@ index 94e6a76..1a19d7d 100644
 +          previewBtn.removeAttribute("disabled");
 +          previewArea.innerHTML = "";
 +          if (!result.ok) {
-+            previewArea.append(h("div", { class: "form-error" }, [ATS_ERROR_MESSAGES[result.error] ?? result.message ?? result.error]));
++            previewArea.append(h("div", { class: "form-error" }, [atsErrorMessage(result.error, result.message)]));
 +            return;
 +          }
 +          if (!result.dry_run) {
@@ -837,7 +979,7 @@ index 94e6a76..1a19d7d 100644
 +          try {
 +            const result = await submitApplicationToAts(application.id, { dry_run: false });
 +            if (!result.ok) {
-+              toast(ATS_ERROR_MESSAGES[result.error] ?? result.message ?? result.error, "error");
++              toast(atsErrorMessage(result.error, result.message), "error");
 +              submitBtn.removeAttribute("disabled");
 +              return;
 +            }
@@ -875,3 +1017,120 @@ index 94e6a76..1a19d7d 100644
    function renderOpportunityCard(): HTMLElement {
      const o = application.opportunity;
      if (!o) return h("div", {}, []);
+diff --git a/web/src/pages/opportunityFeed.ts b/web/src/pages/opportunityFeed.ts
+index b070c3b..9f4ba1a 100644
+--- a/web/src/pages/opportunityFeed.ts
++++ b/web/src/pages/opportunityFeed.ts
+@@ -24,11 +24,14 @@ import {
+   getOpportunityFeed,
+   updateOpportunityMatchInbox,
+   bulkApply,
++  listApplications,
++  submitApplicationToAts,
+   type OpportunityFeedItem,
+   type ResumeFeedGroup,
+ } from "../lib/api";
+ import { feedBadgeCount } from "../lib/navBadges";
+ import { navigate } from "../lib/router";
++import { isLeverPostingUrl, atsErrorMessage } from "../lib/ats";
+ 
+ function pill(text: string, cls: string): HTMLElement {
+   return h("span", { class: `pill pill--${cls}` }, [text]);
+@@ -232,6 +235,75 @@ export async function renderOpportunityFeed(root: HTMLElement) {
+       }
+     }
+ 
++    // Gate R8 — resolves (creating if needed) the tracked application
++    // behind this match, so auto-apply works whether or not the
++    // candidate already clicked "Start application" first. Mirrors
++    // apply()'s own bulkApply call for the "not yet tracked" case; the
++    // "already tracked" case has to fall back to a listApplications scan
++    // because bulk-apply's own "already_applied" result never carries an
++    // application_id (see api/src/routes/opportunity-feed.ts — only the
++    // opportunity_id, since the match row itself doesn't need to know
++    // which application it became once it's promoted).
++    async function resolveApplicationId(): Promise<string | null> {
++      if (item.promoted_opportunity_id) {
++        const apps = await listApplications();
++        return apps.find((a) => a.opportunity_id === item.promoted_opportunity_id)?.id ?? null;
++      }
++      const { results } = await bulkApply([item.opportunity_match_id]);
++      const result = results[0];
++      if (result.status === "failed") {
++        throw new Error(result.error ?? "Could not start an application.");
++      }
++      if (result.opportunity_id) item.promoted_opportunity_id = result.opportunity_id;
++      return result.application_id ?? null;
++    }
++
++    // The feed-level "single click" version of auto-apply: tracks the
++    // application if needed, runs a dry run, shows the candidate exactly
++    // what would be sent in a native confirm() dialog, and only submits
++    // for real if they confirm — same two-step safety posture as the
++    // application detail page's "Preview" / "Submit for real" buttons,
++    // just collapsed into one click plus one confirmation instead of a
++    // page navigation in between.
++    async function autoApplyViaLever() {
++      autoApplyBtn.setAttribute("disabled", "");
++      try {
++        const applicationId = await resolveApplicationId();
++        if (!applicationId) {
++          toast("Couldn't find or create a tracked application for this match.", "error");
++          return;
++        }
++        const preview = await submitApplicationToAts(applicationId, { dry_run: true });
++        if (!preview.ok) {
++          toast(atsErrorMessage(preview.error, preview.message), "error");
++          return;
++        }
++        if (!preview.dry_run) return; // can't happen (dry_run: true above); keeps TS happy
++        const ws = preview.would_submit;
++        const confirmed = confirm(
++          `Submit to "${ws.posting_title}" on Lever now?\n\n` +
++            `Name: ${ws.name}\nEmail: ${ws.email}${ws.phone ? `\nPhone: ${ws.phone}` : ""}\nResume: ${ws.resume_title}\n\n` +
++            "This sends a real application to the employer and can't be undone.",
++        );
++        if (!confirmed) return;
++
++        const result = await submitApplicationToAts(applicationId, { dry_run: false });
++        if (!result.ok) {
++          toast(atsErrorMessage(result.error, result.message), "error");
++          return;
++        }
++        if (result.dry_run) return; // can't happen (dry_run: false above); keeps TS happy
++        item.ats_provider = result.application.ats_provider ?? "lever";
++        item.ats_submitted_at = result.application.ats_submitted_at ?? new Date().toISOString();
++        toast("Submitted to Lever.");
++      } catch (err) {
++        toast(errorMessage(err), "error");
++      } finally {
++        draw();
++      }
++    }
++
++
+     const metaParts = [item.company];
+     if (item.location) metaParts.push(item.location);
+     if (item.work_mode) metaParts.push(item.work_mode);
+@@ -253,6 +325,13 @@ export async function renderOpportunityFeed(root: HTMLElement) {
+     }
+ 
+     const alreadyApplied = item.promoted_opportunity_id !== null;
++    const alreadyAutoApplied = Boolean(item.ats_submitted_at);
++    const showAutoApply = isLeverPostingUrl(item.application_url) && !alreadyAutoApplied;
++    const autoApplyBtn = h(
++      "button",
++      { class: "btn btn--small btn--primary", onClick: autoApplyViaLever, title: "Submits directly through Lever — you'll be asked to confirm first." },
++      ["⚡ Auto-apply (Lever)"],
++    );
+ 
+     // Gate R7: bulk-select checkbox — omitted entirely once an item is
+     // already applied (nothing left to select it for).
+@@ -305,6 +384,7 @@ export async function renderOpportunityFeed(root: HTMLElement) {
+           h("button", { class: "btn btn--small btn--primary", onClick: apply, disabled: alreadyApplied }, [
+             alreadyApplied ? "Application started" : "Start application",
+           ]),
++          showAutoApply ? autoApplyBtn : alreadyAutoApplied ? pill(`Submitted via ${item.ats_provider ?? "Lever"}`, "applied") : null,
+         ]),
+       ]),
+     ]);

@@ -24,11 +24,14 @@ import {
   getOpportunityFeed,
   updateOpportunityMatchInbox,
   bulkApply,
+  listApplications,
+  submitApplicationToAts,
   type OpportunityFeedItem,
   type ResumeFeedGroup,
 } from "../lib/api";
 import { feedBadgeCount } from "../lib/navBadges";
 import { navigate } from "../lib/router";
+import { isLeverPostingUrl, atsErrorMessage } from "../lib/ats";
 
 function pill(text: string, cls: string): HTMLElement {
   return h("span", { class: `pill pill--${cls}` }, [text]);
@@ -232,6 +235,75 @@ export async function renderOpportunityFeed(root: HTMLElement) {
       }
     }
 
+    // Gate R8 — resolves (creating if needed) the tracked application
+    // behind this match, so auto-apply works whether or not the
+    // candidate already clicked "Start application" first. Mirrors
+    // apply()'s own bulkApply call for the "not yet tracked" case; the
+    // "already tracked" case has to fall back to a listApplications scan
+    // because bulk-apply's own "already_applied" result never carries an
+    // application_id (see api/src/routes/opportunity-feed.ts — only the
+    // opportunity_id, since the match row itself doesn't need to know
+    // which application it became once it's promoted).
+    async function resolveApplicationId(): Promise<string | null> {
+      if (item.promoted_opportunity_id) {
+        const apps = await listApplications();
+        return apps.find((a) => a.opportunity_id === item.promoted_opportunity_id)?.id ?? null;
+      }
+      const { results } = await bulkApply([item.opportunity_match_id]);
+      const result = results[0];
+      if (result.status === "failed") {
+        throw new Error(result.error ?? "Could not start an application.");
+      }
+      if (result.opportunity_id) item.promoted_opportunity_id = result.opportunity_id;
+      return result.application_id ?? null;
+    }
+
+    // The feed-level "single click" version of auto-apply: tracks the
+    // application if needed, runs a dry run, shows the candidate exactly
+    // what would be sent in a native confirm() dialog, and only submits
+    // for real if they confirm — same two-step safety posture as the
+    // application detail page's "Preview" / "Submit for real" buttons,
+    // just collapsed into one click plus one confirmation instead of a
+    // page navigation in between.
+    async function autoApplyViaLever() {
+      autoApplyBtn.setAttribute("disabled", "");
+      try {
+        const applicationId = await resolveApplicationId();
+        if (!applicationId) {
+          toast("Couldn't find or create a tracked application for this match.", "error");
+          return;
+        }
+        const preview = await submitApplicationToAts(applicationId, { dry_run: true });
+        if (!preview.ok) {
+          toast(atsErrorMessage(preview.error, preview.message), "error");
+          return;
+        }
+        if (!preview.dry_run) return; // can't happen (dry_run: true above); keeps TS happy
+        const ws = preview.would_submit;
+        const confirmed = confirm(
+          `Submit to "${ws.posting_title}" on Lever now?\n\n` +
+            `Name: ${ws.name}\nEmail: ${ws.email}${ws.phone ? `\nPhone: ${ws.phone}` : ""}\nResume: ${ws.resume_title}\n\n` +
+            "This sends a real application to the employer and can't be undone.",
+        );
+        if (!confirmed) return;
+
+        const result = await submitApplicationToAts(applicationId, { dry_run: false });
+        if (!result.ok) {
+          toast(atsErrorMessage(result.error, result.message), "error");
+          return;
+        }
+        if (result.dry_run) return; // can't happen (dry_run: false above); keeps TS happy
+        item.ats_provider = result.application.ats_provider ?? "lever";
+        item.ats_submitted_at = result.application.ats_submitted_at ?? new Date().toISOString();
+        toast("Submitted to Lever.");
+      } catch (err) {
+        toast(errorMessage(err), "error");
+      } finally {
+        draw();
+      }
+    }
+
+
     const metaParts = [item.company];
     if (item.location) metaParts.push(item.location);
     if (item.work_mode) metaParts.push(item.work_mode);
@@ -253,6 +325,13 @@ export async function renderOpportunityFeed(root: HTMLElement) {
     }
 
     const alreadyApplied = item.promoted_opportunity_id !== null;
+    const alreadyAutoApplied = Boolean(item.ats_submitted_at);
+    const showAutoApply = isLeverPostingUrl(item.application_url) && !alreadyAutoApplied;
+    const autoApplyBtn = h(
+      "button",
+      { class: "btn btn--small btn--primary", onClick: autoApplyViaLever, title: "Submits directly through Lever — you'll be asked to confirm first." },
+      ["⚡ Auto-apply (Lever)"],
+    );
 
     // Gate R7: bulk-select checkbox — omitted entirely once an item is
     // already applied (nothing left to select it for).
@@ -305,6 +384,7 @@ export async function renderOpportunityFeed(root: HTMLElement) {
           h("button", { class: "btn btn--small btn--primary", onClick: apply, disabled: alreadyApplied }, [
             alreadyApplied ? "Application started" : "Start application",
           ]),
+          showAutoApply ? autoApplyBtn : alreadyAutoApplied ? pill(`Submitted via ${item.ats_provider ?? "Lever"}`, "applied") : null,
         ]),
       ]),
     ]);

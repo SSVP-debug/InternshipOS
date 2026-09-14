@@ -109,6 +109,8 @@ function makeSupabaseMock(opts: {
   activeResumeList?: { data: unknown; error: { message: string } | null };
   resumeOwnership?: { data: unknown; error: { message: string } | null };
   resumeScopedMatchList?: { data: unknown; error: { message: string } | null };
+  // Gate R8 follow-up
+  applicationAtsList?: { data: unknown; error: { message: string } | null };
 } = {}) {
   const {
     candidate = { id: CANDIDATE_ID },
@@ -119,6 +121,7 @@ function makeSupabaseMock(opts: {
     activeResumeList = { data: [], error: null },
     resumeOwnership = { data: { id: "resume-1" }, error: null },
     resumeScopedMatchList = { data: [], error: null },
+    applicationAtsList = { data: [], error: null },
   } = opts;
 
   const fromSpy = vi.fn();
@@ -169,6 +172,11 @@ function makeSupabaseMock(opts: {
             col === "id" ? { maybeSingle: async () => resumeOwnership } : Promise.resolve(activeResumeList),
         }),
       };
+    }
+    // Gate R8 follow-up: the ats_provider/ats_submitted_at enrichment
+    // query, `.from("application").select(...).in("opportunity_id", ids)`.
+    if (table === "application") {
+      return { select: () => ({ in: () => queryResult(applicationAtsList.data, applicationAtsList.error) }) };
     }
     return queryResult([], null);
   };
@@ -478,6 +486,56 @@ describe("GET /opportunity-feed", () => {
     await runRoute(getHandlers("get", "/opportunity-feed"), req, res);
 
     expect(res.status).toHaveBeenCalledWith(400);
+  });
+
+  it("Gate R8: enriches an already-promoted match with its application's ats_provider/ats_submitted_at", async () => {
+    const OPPORTUNITY_ID = "owned-opportunity-1";
+    const supabase = makeSupabaseMock({
+      matchList: { data: [{ ...MATCH_ROW, promoted_opportunity_id: OPPORTUNITY_ID }], error: null },
+      applicationAtsList: {
+        data: [{ opportunity_id: OPPORTUNITY_ID, ats_provider: "lever", ats_submitted_at: "2026-09-10T12:00:00Z" }],
+        error: null,
+      },
+    });
+    const req = { supabase } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("get", "/opportunity-feed"), req, res);
+
+    expect(res.status).toHaveBeenCalledWith(200);
+    const body = (res as unknown as { body: { items: Array<{ ats_provider: string | null; ats_submitted_at: string | null }> } }).body;
+    expect(body.items[0].ats_provider).toBe("lever");
+    expect(body.items[0].ats_submitted_at).toBe("2026-09-10T12:00:00Z");
+  });
+
+  it("Gate R8: never queries the application table when nothing is promoted yet", async () => {
+    const supabase = makeSupabaseMock(); // MATCH_ROW has no promoted_opportunity_id
+    const req = { supabase } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("get", "/opportunity-feed"), req, res);
+
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(supabase.fromSpy).not.toHaveBeenCalledWith("application");
+  });
+
+  it("Gate R8: leaves ats_provider/ats_submitted_at null (never throws) when the enrichment query itself errors", async () => {
+    const OPPORTUNITY_ID = "owned-opportunity-1";
+    const supabase = makeSupabaseMock({
+      matchList: { data: [{ ...MATCH_ROW, promoted_opportunity_id: OPPORTUNITY_ID }], error: null },
+      applicationAtsList: { data: null, error: { message: "connection reset" } },
+    });
+    const req = { supabase } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("get", "/opportunity-feed"), req, res);
+
+    // Deliberately still a 200 — see this enrichment's own comment in
+    // opportunity-feed.ts on why it's treated as non-fatal.
+    expect(res.status).toHaveBeenCalledWith(200);
+    const body = (res as unknown as { body: { items: Array<{ ats_provider: string | null; ats_submitted_at: string | null }> } }).body;
+    expect(body.items[0].ats_provider).toBeNull();
+    expect(body.items[0].ats_submitted_at).toBeNull();
   });
 });
 

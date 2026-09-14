@@ -574,9 +574,47 @@ export function opportunityFeedRouter(): Router {
 
     const items = buildOpportunityFeed(matches, sources);
 
+    // Gate R8 follow-up — without this, the frontend's "Auto-apply
+    // (Lever)" button has no way to know a match was already
+    // auto-submitted on a previous visit (see
+    // pages/opportunityFeed.ts's own comment on its session-only
+    // autoAppliedIds Set for the UI-side half of this). Deliberately
+    // NOT added to buildOpportunityFeed() itself or OpportunityFeedItem
+    // in lib/opportunityFeed.ts — that function is also called by
+    // today.ts and dailyQueue.ts, and this enrichment only makes sense
+    // for the feed's own response, not those. Enriching the already-built
+    // items array here, after the fact, keeps the shared pure builder
+    // (and its two other callers) completely untouched.
+    const promotedIds = [...new Set(items.map((i) => i.promoted_opportunity_id).filter((id): id is string => id != null))];
+    let atsByOpportunityId = new Map<string, { ats_provider: string | null; ats_submitted_at: string | null }>();
+    if (promotedIds.length > 0) {
+      const { data: atsRows, error: atsError } = await supabase
+        .from("application")
+        .select("opportunity_id, ats_provider, ats_submitted_at")
+        .in("opportunity_id", promotedIds);
+      // Not fatal: this is a nice-to-have enrichment, not core feed data
+      // — if it fails, the feed itself still renders correctly, just
+      // without "already auto-submitted" badges (same posture as the
+      // promoted_opportunity_id write-back failure noted elsewhere in
+      // this file being non-fatal to the response that triggered it).
+      if (!atsError && atsRows) {
+        atsByOpportunityId = new Map(
+          (atsRows as unknown as Array<{ opportunity_id: string; ats_provider: string | null; ats_submitted_at: string | null }>).map((r) => [
+            r.opportunity_id,
+            { ats_provider: r.ats_provider, ats_submitted_at: r.ats_submitted_at },
+          ]),
+        );
+      }
+    }
+    const enrichedItems = items.map((item) => ({
+      ...item,
+      ats_provider: item.promoted_opportunity_id ? (atsByOpportunityId.get(item.promoted_opportunity_id)?.ats_provider ?? null) : null,
+      ats_submitted_at: item.promoted_opportunity_id ? (atsByOpportunityId.get(item.promoted_opportunity_id)?.ats_submitted_at ?? null) : null,
+    }));
+
     return res.status(200).json({
       generated_at: new Date().toISOString(),
-      items,
+      items: enrichedItems,
       resume_groups: resumeGroups,
     });
   });

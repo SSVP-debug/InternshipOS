@@ -15,6 +15,7 @@ import {
   type ApplicationNote,
   type AtsSubmitDryRunResult,
 } from "../lib/api";
+import { atsErrorMessage } from "../lib/ats";
 
 const TRANSITIONS: Record<ApplicationStatus, ApplicationStatus[]> = {
   SAVED: ["APPLYING", "WITHDRAWN"],
@@ -116,21 +117,6 @@ export async function renderApplicationDetail(root: HTMLElement, applicationId: 
     }
   }
 
-  const ATS_ERROR_MESSAGES: Record<string, string> = {
-    external_ats_submission_disabled: "Auto-submit isn't enabled on this server yet.",
-    unsupported_ats: "This posting isn't hosted on Lever — auto-submit currently only supports Lever-hosted postings.",
-    resume_missing_file: "The resume attached to this application has no uploaded file — attach a document to it under Resumes first.",
-    no_resume_selected: "This application has no resume selected — pick one under Tracking details first.",
-    personal_info_incomplete: "Your legal name and email need to be filled in under Profile before auto-submitting.",
-    opportunity_closed: "This posting is no longer open on Lever.",
-    opportunity_missing_application_url: "This opportunity has no application link on file.",
-    application_not_eligible_for_submission: "This application has already moved past SAVED/APPLYING — auto-submit only applies before that.",
-    ats_posting_unavailable: "Couldn't reach Lever to confirm this posting is still live.",
-    resume_file_unavailable: "Couldn't retrieve the resume file to attach.",
-    resume_file_download_failed: "Couldn't download the resume file to attach.",
-    ats_submission_failed: "Lever rejected the submission",
-  };
-
   function renderAtsSection(): HTMLElement {
     const eligible = application.status === "SAVED" || application.status === "APPLYING";
     const alreadySubmitted = Boolean(application.ats_submitted_at);
@@ -167,7 +153,7 @@ export async function renderApplicationDetail(root: HTMLElement, applicationId: 
           previewBtn.removeAttribute("disabled");
           previewArea.innerHTML = "";
           if (!result.ok) {
-            previewArea.append(h("div", { class: "form-error" }, [ATS_ERROR_MESSAGES[result.error] ?? result.message ?? result.error]));
+            previewArea.append(h("div", { class: "form-error" }, [atsErrorMessage(result.error, result.message)]));
             return;
           }
           if (!result.dry_run) {
@@ -207,7 +193,7 @@ export async function renderApplicationDetail(root: HTMLElement, applicationId: 
           try {
             const result = await submitApplicationToAts(application.id, { dry_run: false });
             if (!result.ok) {
-              toast(ATS_ERROR_MESSAGES[result.error] ?? result.message ?? result.error, "error");
+              toast(atsErrorMessage(result.error, result.message), "error");
               submitBtn.removeAttribute("disabled");
               return;
             }
