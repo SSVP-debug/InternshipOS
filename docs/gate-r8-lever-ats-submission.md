@@ -1,12 +1,22 @@
 # Gate R8 — External ATS Submission (Lever only)
 
-**Status:** Implemented. Migration `0030_application_ats_submission.sql`,
-`api/src/lib/ats/leverAdapter.ts`, and
-`POST /applications/:id/submit-to-ats` in `api/src/routes/application.ts`
-are in place, with unit/route tests (`tests/leverAdapter.test.ts`,
-`tests/application.submit-to-ats.test.ts`, `tests/env.test.ts`). Not yet
-exercised against a live Lever posting — see "What is genuinely
-unverified" below before trusting this in production.
+**Status:** Implemented, including a bulk variant and a template-based
+cover-letter draft. Migration `0030_application_ats_submission.sql`,
+`api/src/lib/ats/leverAdapter.ts`, `api/src/lib/ats/attemptAtsSubmission.ts`
+(the shared core logic, used by both the single and bulk routes),
+`api/src/lib/ats/coverLetterTemplate.ts`,
+`POST /applications/:id/submit-to-ats`,
+`POST /opportunity-matches/bulk-submit-to-ats`, and
+`GET /applications/:id/cover-letter-draft` are all in place, with tests
+(`tests/leverAdapter.test.ts`, `tests/application.submit-to-ats.test.ts`,
+`tests/opportunity-feed.route.test.ts`'s bulk-submit block,
+`tests/coverLetterTemplate.test.ts`,
+`tests/application.cover-letter-draft.test.ts`, `tests/env.test.ts`).
+Frontend: a single-item button on the application detail page, a bulk
+button in the feed's multi-select bar, and a "Generate draft" /
+editable-textarea flow for the cover letter. Not yet exercised against a
+live Lever posting — see "What is genuinely unverified" below before
+trusting this in production.
 
 ## Why this document exists
 
@@ -93,9 +103,25 @@ merits — not assuming "if Lever has one, they all do."
 - **`EXTERNAL_ATS_SUBMISSION_ENABLED` defaults to `false`.** A second,
   independent layer — a fresh deploy or a forgotten env var never
   exposes live submission.
-- **No frontend button yet.** This gate is API-only. Wiring a UI control
-  to it is a separate, later piece of work — deliberately kept separate
-  so the API's safety posture could be reviewed on its own first.
+- **No frontend button yet.** ~~This gate is API-only.~~ Superseded — the
+  frontend now has a single-item button (application detail page), a
+  bulk button (feed multi-select bar, capped at 5 per batch —
+  `BulkSubmitToAtsRequestSchema`, deliberately lower than bulk-apply's
+  20 since these are real, irreversible submissions), and a cover-letter
+  draft flow. All three still gated behind the same
+  `EXTERNAL_ATS_SUBMISSION_ENABLED` switch and per-request `dry_run`
+  default.
+- **Cover letters are templated, not AI-generated.** `GET
+  /applications/:id/cover-letter-draft` assembles a draft from data
+  already on file (candidate name, resume label, matched skills,
+  opportunity title/company) via a plain string template
+  (`coverLetterTemplate.ts`) — not an LLM call. This codebase has no LLM
+  integration (no Anthropic/OpenAI key, no wiring anywhere), and adding
+  one is a deliberate cost/infra decision for the project owner, not
+  something to slip in as a side effect. The draft deliberately includes
+  an obvious placeholder line for "why this role specifically" rather
+  than inventing enthusiasm — a template has no way to know that, and
+  shouldn't pretend to.
 
 ## What is genuinely unverified
 

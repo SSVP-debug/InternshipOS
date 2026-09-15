@@ -8,6 +8,7 @@ import {
   updateApplicationNote,
   deleteApplicationNote,
   submitApplicationToAts,
+  getCoverLetterDraft,
   ApiError,
   type Application,
   type ApplicationStatus,
@@ -139,6 +140,38 @@ export async function renderApplicationDetail(root: HTMLElement, applicationId: 
       body.append(h("div", { class: "form-error" }, [`Last attempt failed: ${application.ats_submission_error}`]));
     }
 
+    let coverLetterText = "";
+    const coverLetterArea = h("textarea", {
+      class: "input",
+      rows: "6",
+      style: "width:100%; margin-top:8px;",
+      placeholder: "Optional — add a cover letter or note to include with this application.",
+      onInput: (e: Event) => {
+        coverLetterText = (e.target as HTMLTextAreaElement).value;
+      },
+    }, []) as HTMLTextAreaElement;
+
+    const generateDraftBtn = h(
+      "button",
+      {
+        class: "btn btn--small",
+        onClick: async () => {
+          generateDraftBtn.setAttribute("disabled", "");
+          try {
+            const draft = await getCoverLetterDraft(application.id);
+            coverLetterText = draft;
+            coverLetterArea.value = draft;
+          } catch (err) {
+            toast(errorMessage(err), "error");
+          } finally {
+            generateDraftBtn.removeAttribute("disabled");
+          }
+        },
+        title: "Fills in a template draft (name, resume, matched skills, opportunity) for you to edit — not AI-generated.",
+      },
+      ["Generate draft"],
+    );
+
     const previewArea = h("div", { style: "margin-top:10px" }, []);
 
     const previewBtn = h(
@@ -149,7 +182,7 @@ export async function renderApplicationDetail(root: HTMLElement, applicationId: 
           previewBtn.setAttribute("disabled", "");
           previewArea.innerHTML = "";
           previewArea.append(h("div", { class: "subtle" }, ["Checking the posting on Lever…"]));
-          const result = await submitApplicationToAts(application.id, { dry_run: true });
+          const result = await submitApplicationToAts(application.id, { dry_run: true, comments: coverLetterText.trim() || undefined });
           previewBtn.removeAttribute("disabled");
           previewArea.innerHTML = "";
           if (!result.ok) {
@@ -161,7 +194,7 @@ export async function renderApplicationDetail(root: HTMLElement, applicationId: 
             // but keeps the branch exhaustive for the type checker.
             return;
           }
-          previewArea.append(renderDryRunPreview(result.would_submit));
+          previewArea.append(renderDryRunPreview(result.would_submit, coverLetterText));
         },
       },
       ["Preview auto-submit"],
@@ -172,7 +205,9 @@ export async function renderApplicationDetail(root: HTMLElement, applicationId: 
         h("div", { class: "subtle", style: "margin-bottom:8px" }, [
           "Auto-submit this application through the employer's ATS, where supported (currently: Lever-hosted postings only, base fields only — no custom screening questions).",
         ]),
-        h("div", { class: "btn-row" }, [previewBtn]),
+        h("div", { class: "btn-row" }, [generateDraftBtn]),
+        coverLetterArea,
+        h("div", { class: "btn-row", style: "margin-top:8px" }, [previewBtn]),
         previewArea,
       ]),
     );
@@ -180,7 +215,7 @@ export async function renderApplicationDetail(root: HTMLElement, applicationId: 
     return h("div", { class: "card" }, [body]);
   }
 
-  function renderDryRunPreview(wouldSubmit: AtsSubmitDryRunResult["would_submit"]): HTMLElement {
+  function renderDryRunPreview(wouldSubmit: AtsSubmitDryRunResult["would_submit"], coverLetterText: string): HTMLElement {
     const submitBtn = h(
       "button",
       {
@@ -191,7 +226,7 @@ export async function renderApplicationDetail(root: HTMLElement, applicationId: 
           }
           submitBtn.setAttribute("disabled", "");
           try {
-            const result = await submitApplicationToAts(application.id, { dry_run: false });
+            const result = await submitApplicationToAts(application.id, { dry_run: false, comments: coverLetterText.trim() || undefined });
             if (!result.ok) {
               toast(atsErrorMessage(result.error, result.message), "error");
               submitBtn.removeAttribute("disabled");

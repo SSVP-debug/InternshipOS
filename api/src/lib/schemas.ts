@@ -441,3 +441,18 @@ export const ApplicationSubmitToAtsRequestSchema = z.object({
   comments: z.string().trim().max(4000).optional(),
 });
 export type ApplicationSubmitToAtsRequest = z.infer<typeof ApplicationSubmitToAtsRequestSchema>;
+
+// Same dry_run-defaults-true safety posture as the single-item schema
+// above, but capped at 5 rather than BulkApplyRequestSchema's 20 — that
+// cap is fine for a harmless internal tracking action; this one sends
+// real, irreversible applications to real employers, so a single click
+// should not be able to fire off 20 of those at once even with dry_run
+// off. If this proves too conservative in practice it's a one-line
+// change, not a design problem — same posture as that other cap's own
+// comment.
+export const BulkSubmitToAtsRequestSchema = z.object({
+  opportunity_match_ids: z.array(z.string().uuid()).min(1).max(5),
+  dry_run: z.boolean().optional().default(true),
+  comments: z.string().trim().max(4000).optional(),
+});
+export type BulkSubmitToAtsRequest = z.infer<typeof BulkSubmitToAtsRequestSchema>;

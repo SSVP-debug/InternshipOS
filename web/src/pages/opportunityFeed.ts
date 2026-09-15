@@ -24,6 +24,7 @@ import {
   getOpportunityFeed,
   updateOpportunityMatchInbox,
   bulkApply,
+  bulkSubmitApplicationsToAts,
   listApplications,
   submitApplicationToAts,
   type OpportunityFeedItem,
@@ -174,12 +175,69 @@ export async function renderOpportunityFeed(root: HTMLElement) {
       }
     }
 
+    // Gate R8 follow-up — of the selected matches, only the ones that
+    // are (a) Lever-hosted and (b) not already auto-submitted are worth
+    // sending to the bulk endpoint at all; filtering client-side first
+    // avoids a confusing "N rejected" summary full of items that were
+    // never going to qualify. The backend's own 5-item cap
+    // (BulkSubmitToAtsRequestSchema) is still the authority — this is
+    // just a courtesy trim so the confirm dialog's count matches what
+    // will actually be attempted.
+    const MAX_BULK_SUBMIT = 5;
+    const eligibleForAutoApply = [...selected].filter((id) => {
+      const item = items.find((i) => i.opportunity_match_id === id);
+      return item ? isLeverPostingUrl(item.application_url) && !item.ats_submitted_at : false;
+    });
+    const autoApplyIds = eligibleForAutoApply.slice(0, MAX_BULK_SUBMIT);
+    const truncatedCount = eligibleForAutoApply.length - autoApplyIds.length;
+
+    async function autoApplySelected() {
+      try {
+        const preview = await bulkSubmitApplicationsToAts(autoApplyIds, { dry_run: true });
+        const eligible = preview.results.filter((r) => r.status === "dry_run");
+        if (eligible.length === 0) {
+          toast("None of the selected matches could be auto-submitted right now.", "error");
+          return;
+        }
+        const summaryLines = eligible.map((r) => `• ${r.would_submit?.posting_title ?? r.opportunity_match_id}`).join("\n");
+        const skipped = preview.results.length - eligible.length;
+        const confirmed = confirm(
+          `Submit ${eligible.length} application(s) to Lever now?\n\n${summaryLines}\n\n` +
+            (skipped > 0 ? `${skipped} other selected match(es) aren't eligible and will be skipped.\n\n` : "") +
+            (truncatedCount > 0 ? `${truncatedCount} more selected match(es) were left out of this batch (limit ${MAX_BULK_SUBMIT} at a time).\n\n` : "") +
+            "This sends real applications to these employers and can't be undone.",
+        );
+        if (!confirmed) return;
+
+        const { results, summary } = await bulkSubmitApplicationsToAts(eligible.map((r) => r.opportunity_match_id), { dry_run: false });
+        for (const result of results) {
+          if (result.status !== "submitted") continue;
+          const item = items.find((i) => i.opportunity_match_id === result.opportunity_match_id);
+          if (item) {
+            item.ats_provider = "lever";
+            item.ats_submitted_at = new Date().toISOString();
+          }
+        }
+        const parts = [`${summary.submitted} submitted`];
+        if (summary.failed > 0) parts.push(`${summary.failed} failed`);
+        if (summary.rejected > 0) parts.push(`${summary.rejected} rejected`);
+        toast(parts.join(", ") + ".", summary.failed > 0 || summary.rejected > 0 ? "error" : "success");
+        selected.clear();
+        draw();
+      } catch (err) {
+        toast(errorMessage(err), "error");
+      }
+    }
+
     return h("div", { class: "card", style: "margin-top:16px" }, [
       h("div", { class: "spread" }, [
         h("div", {}, [`${selected.size} selected`]),
         h("div", { class: "btn-row" }, [
           h("button", { class: "btn btn--small", onClick: () => { selected.clear(); draw(); } }, ["Clear"]),
           h("button", { class: "btn btn--small btn--primary", onClick: applySelected }, ["Start applications"]),
+          autoApplyIds.length > 0
+            ? h("button", { class: "btn btn--small btn--primary", onClick: autoApplySelected }, [`⚡ Auto-apply ${autoApplyIds.length} (Lever)`])
+            : null,
         ]),
       ]),
     ]);

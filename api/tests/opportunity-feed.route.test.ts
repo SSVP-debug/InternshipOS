@@ -1,7 +1,22 @@
 import { describe, it, expect, vi } from "vitest";
 import type { Response } from "express";
 import type { AuthedRequest } from "../src/middleware/auth.js";
-import { opportunityFeedRouter } from "../src/routes/opportunity-feed.js";
+import type { Env } from "../src/lib/env.js";
+import type { AtsSubmissionOutcome, AtsApplicationRow } from "../src/lib/ats/attemptAtsSubmission.js";
+
+// Gate R8 follow-up (bulk-submit-to-ats tests below): mocked at module
+// level rather than re-building attemptAtsSubmission's own full DB/fetch
+// dependency chain (evidence_source, personal_info, opportunity, Lever
+// fetch) a second time here — that chain already has 10 dedicated tests
+// in application.submit-to-ats.test.ts. This file's job is to test the
+// BULK ROUTE's own orchestration (resolving each match to an
+// application, isolating one item's failure from the rest, summary
+// counts) — not to re-verify attemptAtsSubmission's internals.
+vi.mock("../src/lib/ats/attemptAtsSubmission.js", () => ({ attemptAtsSubmission: vi.fn() }));
+const { attemptAtsSubmission } = await import("../src/lib/ats/attemptAtsSubmission.js");
+const attemptAtsSubmissionMock = attemptAtsSubmission as unknown as ReturnType<typeof vi.fn>;
+
+const { opportunityFeedRouter } = await import("../src/routes/opportunity-feed.js");
 
 interface RouteLayer {
   route?: {
@@ -11,8 +26,28 @@ interface RouteLayer {
   };
 }
 
-function getHandlers(method: "get" | "patch" | "post", path: string) {
-  const router = opportunityFeedRouter() as unknown as { stack: RouteLayer[] };
+// Gate R8 follow-up: opportunityFeedRouter now takes env (for the bulk
+// submit-to-ats kill switch). Every pre-existing test in this file is
+// unaffected by the flag's value; only the new
+// "POST /opportunity-matches/bulk-submit-to-ats" tests care — so this
+// default just needs to be *a* valid Env, with the flag on so those
+// tests can reach past the switch, same rationale as
+// application.route.test.ts's own TEST_ENV.
+const TEST_ENV: Env = {
+  SUPABASE_URL: "https://example.supabase.co",
+  SUPABASE_ANON_KEY: "anon-key",
+  SUPABASE_SERVICE_ROLE_KEY: "service-role-key",
+  PORT: 3000,
+  CONSENT_POLICY_VERSION: "v1.0",
+  NODE_ENV: "test",
+  RATE_LIMIT_WINDOW_MINUTES: 15,
+  SIGNUP_RATE_LIMIT_MAX: 5,
+  EXTERNAL_ATS_SUBMISSION_ENABLED: true,
+};
+const DISABLED_ENV: Env = { ...TEST_ENV, EXTERNAL_ATS_SUBMISSION_ENABLED: false };
+
+function getHandlers(method: "get" | "patch" | "post", path: string, env: Env = TEST_ENV) {
+  const router = opportunityFeedRouter(env) as unknown as { stack: RouteLayer[] };
   const layer = router.stack.find((l) => l.route?.path === path && l.route?.methods[method]);
   if (!layer?.route) throw new Error(`no route registered for ${method.toUpperCase()} ${path}`);
   return layer.route.stack.map((s) => s.handle);
@@ -777,6 +812,11 @@ function makeBulkApplyMock(opts: {
   createApplicationError?: { message: string; code?: string } | null;
   applicationInserts?: Array<Record<string, unknown>>; // spy target
   opportunityInserts?: Array<Record<string, unknown>>; // spy target
+  // Gate R8 follow-up — for bulk-submit-to-ats's "already_applied"
+  // resolution lookup (select application.id by opportunity_id), keyed
+  // by opportunity_id. Empty object means "not found" for every id,
+  // same convention as the other keyed-record options above.
+  applicationByOpportunityId?: Record<string, { id: string } | null>;
   // Gate R6 — the candidate's other opportunity_source-backed
   // opportunities, considered for the fuzzy dedup check. Defaults to []
   // (no fuzzy match found), same "unchanged behavior unless configured"
@@ -793,6 +833,7 @@ function makeBulkApplyMock(opts: {
     applicationInserts = [],
     opportunityInserts = [],
     fuzzyCandidateOpportunities = [],
+    applicationByOpportunityId = {},
   } = opts;
 
   let opportunityInsertCount = 0;
@@ -863,6 +904,15 @@ function makeBulkApplyMock(opts: {
       }
       if (table === "application") {
         return {
+          // Gate R8 follow-up: bulk-submit-to-ats's own resolution
+          // lookup for applyOneMatch's "already_applied" result (which
+          // carries opportunity_id, not application_id — see that
+          // interface's own comment on why).
+          select: () => ({
+            eq: (_c: string, opportunityId: string) => ({
+              maybeSingle: async () => ({ data: applicationByOpportunityId[opportunityId] ?? null, error: null }),
+            }),
+          }),
           insert: (payload: Record<string, unknown>) => {
             applicationInserts.push(payload);
             return {
@@ -1146,5 +1196,128 @@ describe("POST /opportunity-matches/bulk-apply (Gate R5)", () => {
 
     const body = res.body as { results: Array<{ opportunity_id?: string }> };
     expect(body.results[0].opportunity_id).toBe("exact-match-opportunity");
+  });
+});
+
+describe("POST /opportunity-matches/bulk-submit-to-ats (Gate R8 follow-up)", () => {
+  it("returns 403 when EXTERNAL_ATS_SUBMISSION_ENABLED is off, before touching applyOneMatch or attemptAtsSubmission at all", async () => {
+    const supabase = makeBulkApplyMock();
+    const req = { supabase, body: { opportunity_match_ids: [MATCH_A_ID] } } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("post", "/opportunity-matches/bulk-submit-to-ats", DISABLED_ENV), req, res);
+
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(attemptAtsSubmissionMock).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 for more than 5 ids — a much lower cap than bulk-apply's 20, since these are real submissions", async () => {
+    const supabase = makeBulkApplyMock();
+    const req = { supabase, body: { opportunity_match_ids: new Array(6).fill(MATCH_A_ID) } } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("post", "/opportunity-matches/bulk-submit-to-ats"), req, res);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(attemptAtsSubmissionMock).not.toHaveBeenCalled();
+  });
+
+  it("resolves a freshly-tracked match's new application_id and passes it to attemptAtsSubmission", async () => {
+    attemptAtsSubmissionMock.mockReset();
+    attemptAtsSubmissionMock.mockResolvedValueOnce({ kind: "dry_run", would_submit: { site: "acme", posting_id: "p1", posting_title: "Intern", name: "Ada Lovelace", email: "ada@example.com", resume_title: "Resume" } } satisfies AtsSubmissionOutcome);
+    const supabase = makeBulkApplyMock({
+      matches: { [MATCH_A_ID]: { id: MATCH_A_ID, opportunity_source_id: SOURCE_A_ID, resume_id: RESUME_ID, promoted_opportunity_id: null } },
+      sources: { [SOURCE_A_ID]: { id: SOURCE_A_ID, ...SOURCE_ROW_TEMPLATE } },
+    });
+    const req = { supabase, body: { opportunity_match_ids: [MATCH_A_ID], dry_run: true } } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("post", "/opportunity-matches/bulk-submit-to-ats"), req, res);
+
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(attemptAtsSubmissionMock).toHaveBeenCalledTimes(1);
+    expect(attemptAtsSubmissionMock.mock.calls[0][2]).toBe("app-1"); // application id — see makeBulkApplyMock's insert stub
+    expect(attemptAtsSubmissionMock.mock.calls[0][3]).toEqual({ dryRun: true, comments: undefined });
+    const body = res.body as { results: Array<{ status: string; application_id?: string }> };
+    expect(body.results[0]).toEqual(expect.objectContaining({ opportunity_match_id: MATCH_A_ID, status: "dry_run", application_id: "app-1" }));
+  });
+
+  it("resolves an already-tracked match's existing application_id via the opportunity_id lookup", async () => {
+    attemptAtsSubmissionMock.mockReset();
+    attemptAtsSubmissionMock.mockResolvedValueOnce({
+      kind: "submitted",
+      application: { id: "existing-app-9", status: "APPLIED" } as unknown as AtsApplicationRow,
+    } as AtsSubmissionOutcome);
+    const supabase = makeBulkApplyMock({
+      matches: { [MATCH_A_ID]: { id: MATCH_A_ID, opportunity_source_id: SOURCE_A_ID, resume_id: null, promoted_opportunity_id: "prior-opportunity-1" } },
+      applicationByOpportunityId: { "prior-opportunity-1": { id: "existing-app-9" } },
+    });
+    const req = { supabase, body: { opportunity_match_ids: [MATCH_A_ID], dry_run: false } } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("post", "/opportunity-matches/bulk-submit-to-ats"), req, res);
+
+    expect(attemptAtsSubmissionMock.mock.calls[0][2]).toBe("existing-app-9");
+    const body = res.body as { results: Array<{ status: string; application_id?: string }> };
+    expect(body.results[0]).toEqual(expect.objectContaining({ opportunity_match_id: MATCH_A_ID, status: "submitted", application_id: "existing-app-9" }));
+  });
+
+  it("reports could_not_resolve_application, and skips attemptAtsSubmission entirely, when an already-tracked match's application can't be found", async () => {
+    attemptAtsSubmissionMock.mockReset();
+    const supabase = makeBulkApplyMock({
+      matches: { [MATCH_A_ID]: { id: MATCH_A_ID, opportunity_source_id: SOURCE_A_ID, resume_id: null, promoted_opportunity_id: "prior-opportunity-1" } },
+      applicationByOpportunityId: {}, // lookup finds nothing
+    });
+    const req = { supabase, body: { opportunity_match_ids: [MATCH_A_ID] } } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("post", "/opportunity-matches/bulk-submit-to-ats"), req, res);
+
+    expect(attemptAtsSubmissionMock).not.toHaveBeenCalled();
+    const body = res.body as { results: Array<{ status: string; error?: string }> };
+    expect(body.results[0]).toEqual(expect.objectContaining({ status: "rejected", error: "could_not_resolve_application" }));
+  });
+
+  it("isolates one item's failure from the rest: a bad match id doesn't stop the remaining ones", async () => {
+    attemptAtsSubmissionMock.mockReset();
+    attemptAtsSubmissionMock.mockResolvedValueOnce({ kind: "dry_run", would_submit: { site: "acme", posting_id: "p1", posting_title: "Intern", name: "Ada", email: "ada@example.com", resume_title: "R" } } satisfies AtsSubmissionOutcome);
+    const supabase = makeBulkApplyMock({
+      matches: {
+        [MATCH_A_ID]: null, // not found -> applyOneMatch reports "failed"
+        [MATCH_B_ID]: { id: MATCH_B_ID, opportunity_source_id: SOURCE_A_ID, resume_id: RESUME_ID, promoted_opportunity_id: null },
+      },
+      sources: { [SOURCE_A_ID]: { id: SOURCE_A_ID, ...SOURCE_ROW_TEMPLATE } },
+    });
+    const req = { supabase, body: { opportunity_match_ids: [MATCH_A_ID, MATCH_B_ID] } } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("post", "/opportunity-matches/bulk-submit-to-ats"), req, res);
+
+    expect(res.status).toHaveBeenCalledWith(200);
+    const body = res.body as { results: Array<{ opportunity_match_id: string; status: string }>; summary: Record<string, number> };
+    expect(body.results).toHaveLength(2);
+    expect(body.results[0]).toEqual(expect.objectContaining({ opportunity_match_id: MATCH_A_ID, status: "rejected" }));
+    expect(body.results[1]).toEqual(expect.objectContaining({ opportunity_match_id: MATCH_B_ID, status: "dry_run" }));
+    expect(body.summary).toEqual({ submitted: 0, dry_run: 1, rejected: 1, failed: 0 });
+    // Only one call — the second match's own attempt, never a retry of the first.
+    expect(attemptAtsSubmissionMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("maps a submission_failed outcome to a failed result without throwing", async () => {
+    attemptAtsSubmissionMock.mockReset();
+    attemptAtsSubmissionMock.mockResolvedValueOnce({ kind: "submission_failed", message: "Missing required field: phone" } satisfies AtsSubmissionOutcome);
+    const supabase = makeBulkApplyMock({
+      matches: { [MATCH_A_ID]: { id: MATCH_A_ID, opportunity_source_id: SOURCE_A_ID, resume_id: RESUME_ID, promoted_opportunity_id: null } },
+      sources: { [SOURCE_A_ID]: { id: SOURCE_A_ID, ...SOURCE_ROW_TEMPLATE } },
+    });
+    const req = { supabase, body: { opportunity_match_ids: [MATCH_A_ID], dry_run: false } } as unknown as AuthedRequest;
+    const res = makeRes();
+
+    await runRoute(getHandlers("post", "/opportunity-matches/bulk-submit-to-ats"), req, res);
+
+    const body = res.body as { results: Array<{ status: string; error?: string; message?: string }> };
+    expect(body.results[0]).toEqual(
+      expect.objectContaining({ status: "failed", error: "ats_submission_failed", message: "Missing required field: phone" }),
+    );
   });
 });

@@ -87,7 +87,10 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { Router } from "express";
 import type { AuthedRequest } from "../middleware/auth.js";
-import { OpportunityInboxUpdateSchema, BulkApplyRequestSchema, UuidParamSchema } from "../lib/schemas.js";
+import type { Env } from "../lib/env.js";
+import { OpportunityInboxUpdateSchema, BulkApplyRequestSchema, BulkSubmitToAtsRequestSchema, UuidParamSchema } from "../lib/schemas.js";
+import { attemptAtsSubmission, type AtsSubmissionOutcome, type WouldSubmitPreview } from "../lib/ats/attemptAtsSubmission.js";
+import { APPLICATION_COLUMNS } from "./application.js";
 import {
   buildOpportunityFeed,
   buildDedupKey,
@@ -172,6 +175,30 @@ interface BulkApplyResult {
   application_id?: string;
   opportunity_id?: string;
   error?: string;
+}
+
+// Gate R8 follow-up — one entry per selected match in
+// POST /opportunity-matches/bulk-submit-to-ats's response.
+interface BulkSubmitToAtsResult {
+  opportunity_match_id: string;
+  status: "submitted" | "dry_run" | "rejected" | "failed";
+  application_id?: string;
+  error?: string;
+  message?: string;
+  would_submit?: WouldSubmitPreview;
+}
+
+function toBulkSubmitResult(opportunityMatchId: string, applicationId: string, outcome: AtsSubmissionOutcome): BulkSubmitToAtsResult {
+  if (outcome.kind === "rejected") {
+    return { opportunity_match_id: opportunityMatchId, application_id: applicationId, status: "rejected", error: outcome.error, message: outcome.message };
+  }
+  if (outcome.kind === "dry_run") {
+    return { opportunity_match_id: opportunityMatchId, application_id: applicationId, status: "dry_run", would_submit: outcome.would_submit };
+  }
+  if (outcome.kind === "submission_failed") {
+    return { opportunity_match_id: opportunityMatchId, application_id: applicationId, status: "failed", error: "ats_submission_failed", message: outcome.message };
+  }
+  return { opportunity_match_id: opportunityMatchId, application_id: applicationId, status: "submitted", message: outcome.warning };
 }
 
 /**
@@ -434,7 +461,7 @@ async function applyOneMatch(
   };
 }
 
-export function opportunityFeedRouter(): Router {
+export function opportunityFeedRouter(env: Env): Router {
   const router = Router();
 
   router.get("/opportunity-feed", async (req: AuthedRequest, res) => {
@@ -716,6 +743,90 @@ export function opportunityFeedRouter(): Router {
     const summary = {
       applied: results.filter((r) => r.status === "applied").length,
       already_applied: results.filter((r) => r.status === "already_applied").length,
+      failed: results.filter((r) => r.status === "failed").length,
+    };
+
+    return res.status(200).json({ results, summary });
+  });
+
+  // Gate R8 follow-up — the bulk version of submit-to-ats. Reuses
+  // applyOneMatch (above) to resolve-or-create the tracked application
+  // behind each selected match, exactly like bulk-apply does, then runs
+  // the SAME attemptAtsSubmission() core logic POST
+  // /applications/:id/submit-to-ats uses — see that function's own file
+  // for why it was extracted, and docs/gate-r8-lever-ats-submission.md
+  // for the underlying Lever-only/base-fields-only limits this inherits
+  // unchanged. This route adds nothing new to what's supported; it's
+  // purely "do the same thing N times, sequentially, with isolated
+  // per-item results" — same posture as bulk-apply's own loop above,
+  // and for the same reason: several dependent writes per item, no
+  // benefit to parallelizing against a connection with no client-side
+  // pooling, and much easier partial-failure reporting done one at a
+  // time.
+  router.post("/opportunity-matches/bulk-submit-to-ats", async (req: AuthedRequest, res) => {
+    if (!env.EXTERNAL_ATS_SUBMISSION_ENABLED) {
+      return res.status(403).json({
+        error: "external_ats_submission_disabled",
+        message: "External ATS submission is disabled on this server (EXTERNAL_ATS_SUBMISSION_ENABLED is not set).",
+      });
+    }
+
+    const parsed = BulkSubmitToAtsRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: "invalid_request", details: parsed.error.flatten() });
+    }
+
+    const supabase = req.supabase!;
+    const candidateId = await getOwnCandidateId(req);
+    if (!candidateId) {
+      return res.status(404).json({ error: "candidate_not_found" });
+    }
+
+    const results: BulkSubmitToAtsResult[] = [];
+    for (const opportunityMatchId of parsed.data.opportunity_match_ids) {
+      const applyResult = await applyOneMatch(supabase, candidateId, opportunityMatchId);
+      if (applyResult.status === "failed") {
+        results.push({ opportunity_match_id: opportunityMatchId, status: "rejected", error: applyResult.error ?? "could_not_track_application" });
+        continue;
+      }
+
+      // applyOneMatch's "applied" result carries application_id directly;
+      // "already_applied" only carries opportunity_id (see that
+      // interface's own comment on why — the match row itself never
+      // needs to know which application it became). One extra lookup
+      // to resolve it in that case, same as the frontend's own
+      // resolveApplicationId did before this server-side route existed
+      // (see pages/opportunityFeed.ts) — done here now instead, so a
+      // bulk caller gets it in one round trip rather than needing its
+      // own follow-up query per already-tracked item.
+      let applicationId = applyResult.application_id;
+      if (!applicationId && applyResult.opportunity_id) {
+        const { data: existingApplication } = await supabase
+          .from("application")
+          .select("id")
+          .eq("opportunity_id", applyResult.opportunity_id)
+          .maybeSingle();
+        applicationId = (existingApplication as { id: string } | null)?.id;
+      }
+      if (!applicationId) {
+        results.push({ opportunity_match_id: opportunityMatchId, status: "rejected", error: "could_not_resolve_application" });
+        continue;
+      }
+
+      const outcome = await attemptAtsSubmission(
+        supabase,
+        candidateId,
+        applicationId,
+        { dryRun: parsed.data.dry_run, comments: parsed.data.comments },
+        APPLICATION_COLUMNS,
+      );
+      results.push(toBulkSubmitResult(opportunityMatchId, applicationId, outcome));
+    }
+
+    const summary = {
+      submitted: results.filter((r) => r.status === "submitted").length,
+      dry_run: results.filter((r) => r.status === "dry_run").length,
+      rejected: results.filter((r) => r.status === "rejected").length,
       failed: results.filter((r) => r.status === "failed").length,
     };
 

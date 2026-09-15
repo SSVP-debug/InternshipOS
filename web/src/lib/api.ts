@@ -868,3 +868,39 @@ export const bulkApply = (opportunityMatchIds: string[]) =>
   post<{ results: BulkApplyResult[]; summary: BulkApplySummary }>("/opportunity-matches/bulk-apply", {
     opportunity_match_ids: opportunityMatchIds,
   });
+
+// Gate R8 follow-up — the bulk version of submitApplicationToAts. Unlike
+// that function, this one does NOT fold per-item rejections into the
+// return value: the backend already reports each match's own
+// success/rejection/failure inside `results` (mirroring bulkApply's own
+// shape above), so a 200 here always means "the request was processed",
+// with per-item outcomes to inspect — not "every item succeeded". Only a
+// whole-request-level problem (403 disabled, 400 invalid ids/cap
+// exceeded, network/server error) throws ApiError, same as bulkApply.
+export interface BulkSubmitToAtsResult {
+  opportunity_match_id: string;
+  status: "submitted" | "dry_run" | "rejected" | "failed";
+  application_id?: string;
+  error?: string;
+  message?: string;
+  would_submit?: AtsSubmitDryRunResult["would_submit"];
+}
+export interface BulkSubmitToAtsSummary {
+  submitted: number;
+  dry_run: number;
+  rejected: number;
+  failed: number;
+}
+export const bulkSubmitApplicationsToAts = (opportunityMatchIds: string[], options: { dry_run: boolean; comments?: string }) =>
+  post<{ results: BulkSubmitToAtsResult[]; summary: BulkSubmitToAtsSummary }>("/opportunity-matches/bulk-submit-to-ats", {
+    opportunity_match_ids: opportunityMatchIds,
+    ...options,
+  });
+
+// Gate R8 follow-up — a TEMPLATED draft (candidate name, resume label,
+// matched skills, opportunity title/company), not AI-generated prose —
+// see api/src/lib/ats/coverLetterTemplate.ts's own header for why. Always
+// meant to be reviewed/edited before use; never auto-applied to a
+// submission without the candidate seeing it first (see
+// applicationDetail.ts's own use of this).
+export const getCoverLetterDraft = (applicationId: string) => get<{ draft: string }>(`/applications/${applicationId}/cover-letter-draft`).then((b) => b.draft);

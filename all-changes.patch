@@ -30,10 +30,10 @@ index f4643a6..fd5533c 100644
  
  export type Env = z.infer<typeof EnvSchema>;
 diff --git a/api/src/lib/schemas.ts b/api/src/lib/schemas.ts
-index 61dcd0a..d7a697b 100644
+index 61dcd0a..b3024c6 100644
 --- a/api/src/lib/schemas.ts
 +++ b/api/src/lib/schemas.ts
-@@ -427,3 +427,17 @@ export const ApplicationNoteRequestSchema = z.object({
+@@ -427,3 +427,32 @@ export const ApplicationNoteRequestSchema = z.object({
    content: z.string().trim().min(1),
  });
  export type ApplicationNoteRequest = z.infer<typeof ApplicationNoteRequestSchema>;
@@ -51,8 +51,23 @@ index 61dcd0a..d7a697b 100644
 +  comments: z.string().trim().max(4000).optional(),
 +});
 +export type ApplicationSubmitToAtsRequest = z.infer<typeof ApplicationSubmitToAtsRequestSchema>;
++
++// Same dry_run-defaults-true safety posture as the single-item schema
++// above, but capped at 5 rather than BulkApplyRequestSchema's 20 — that
++// cap is fine for a harmless internal tracking action; this one sends
++// real, irreversible applications to real employers, so a single click
++// should not be able to fire off 20 of those at once even with dry_run
++// off. If this proves too conservative in practice it's a one-line
++// change, not a design problem — same posture as that other cap's own
++// comment.
++export const BulkSubmitToAtsRequestSchema = z.object({
++  opportunity_match_ids: z.array(z.string().uuid()).min(1).max(5),
++  dry_run: z.boolean().optional().default(true),
++  comments: z.string().trim().max(4000).optional(),
++});
++export type BulkSubmitToAtsRequest = z.infer<typeof BulkSubmitToAtsRequestSchema>;
 diff --git a/api/src/routes/application.ts b/api/src/routes/application.ts
-index f37d9f9..171e450 100644
+index f37d9f9..e53e73d 100644
 --- a/api/src/routes/application.ts
 +++ b/api/src/routes/application.ts
 @@ -13,6 +13,25 @@
@@ -81,7 +96,7 @@ index f37d9f9..171e450 100644
  //
  // No DELETE route — see 0018_application.sql's header: WITHDRAWN is the
  // intended terminal state for "no longer pursuing this," preserving
-@@ -34,16 +53,27 @@
+@@ -34,16 +53,25 @@
  
  import { Router } from "express";
  import type { AuthedRequest } from "../middleware/auth.js";
@@ -93,12 +108,11 @@ index f37d9f9..171e450 100644
 +  ApplicationSubmitToAtsRequestSchema,
    UuidParamSchema,
  } from "../lib/schemas.js";
-+import { parseLeverPostingUrl, getLeverPosting, submitLeverApplication } from "../lib/ats/leverAdapter.js";
-+
-+const EVIDENCE_BUCKET = "evidence-documents";
-+const DOWNLOAD_URL_EXPIRY_SECONDS = 60; // short-lived — used immediately, server-side, never returned to a client
++import { attemptAtsSubmission } from "../lib/ats/attemptAtsSubmission.js";
++import { generateCoverLetterDraft } from "../lib/ats/coverLetterTemplate.js";
  
- const APPLICATION_COLUMNS =
+-const APPLICATION_COLUMNS =
++export const APPLICATION_COLUMNS =
    "id, opportunity_id, resume_id, status, applied_at, deadline_override, next_action_date, " +
 -  "next_action_note, recruiter_name, recruiter_email, created_at, updated_at";
 +  "next_action_note, recruiter_name, recruiter_email, created_at, updated_at, " +
@@ -110,7 +124,7 @@ index f37d9f9..171e450 100644
  
  const OPPORTUNITY_SUMMARY_COLUMNS =
    "id, title, company, location, work_mode, application_url, deadline_date";
-@@ -82,6 +112,11 @@ interface ApplicationDbRow {
+@@ -82,6 +110,11 @@ interface ApplicationDbRow {
    recruiter_email: string | null;
    created_at: string;
    updated_at: string;
@@ -122,7 +136,7 @@ index f37d9f9..171e450 100644
  }
  
  interface OpportunitySummaryDbRow {
-@@ -112,7 +147,7 @@ async function getOwnCandidateId(req: AuthedRequest): Promise<string | null> {
+@@ -112,7 +145,7 @@ async function getOwnCandidateId(req: AuthedRequest): Promise<string | null> {
    return data.id as string;
  }
  
@@ -131,7 +145,7 @@ index f37d9f9..171e450 100644
    const router = Router();
  
    router.get("/applications", async (req: AuthedRequest, res) => {
-@@ -444,5 +479,250 @@ export function applicationRouter(): Router {
+@@ -444,5 +477,115 @@ export function applicationRouter(): Router {
      return res.status(200).json({ application: data });
    });
  
@@ -140,6 +154,72 @@ index f37d9f9..171e450 100644
 +  // returns before calling Lever — nothing here calls submitLeverApplication
 +  // except the single call at the very end, after every precondition and
 +  // (for a real, non-dry-run attempt) the live posting check have passed.
++  // Gate R8 follow-up — a templated cover-letter DRAFT, not AI-generated
++  // prose. See coverLetterTemplate.ts's own header for why: this
++  // codebase has no LLM integration, and adding one is a deliberate
++  // cost/infra decision, not something to slip in here. This route
++  // exists so the frontend can offer a starting point the candidate
++  // edits (or discards) before it's used as submit-to-ats's `comments`
++  // field — it is never sent anywhere on its own, and never
++  // auto-attached to a submission without the candidate seeing it first.
++  router.get("/applications/:id/cover-letter-draft", async (req: AuthedRequest, res) => {
++    const idParsed = UuidParamSchema.safeParse(req.params.id);
++    if (!idParsed.success) {
++      return res.status(400).json({ error: "invalid_id" });
++    }
++    const supabase = req.supabase!;
++
++    const { data: applicationRaw, error: applicationError } = await supabase
++      .from("application")
++      .select("id, resume_id, opportunity_id")
++      .eq("id", idParsed.data)
++      .maybeSingle();
++    if (applicationError) {
++      return res.status(400).json({ error: "application_fetch_failed", message: applicationError.message });
++    }
++    if (!applicationRaw) {
++      return res.status(404).json({ error: "application_not_found" });
++    }
++    const application = applicationRaw as unknown as { id: string; resume_id: string | null; opportunity_id: string };
++
++    const [opportunityResult, personalInfoResult, resumeResult] = await Promise.all([
++      supabase.from("opportunity").select("title, company").eq("id", application.opportunity_id).maybeSingle(),
++      supabase.from("personal_info").select("legal_first_name, legal_last_name").maybeSingle(),
++      application.resume_id ? supabase.from("resume").select("label").eq("id", application.resume_id).maybeSingle() : Promise.resolve({ data: null, error: null }),
++    ]);
++    if (opportunityResult.error || personalInfoResult.error || resumeResult.error) {
++      const firstError = opportunityResult.error ?? personalInfoResult.error ?? resumeResult.error;
++      return res.status(400).json({ error: "application_fetch_failed", message: firstError!.message });
++    }
++
++    const opportunity = opportunityResult.data as { title: string; company: string } | null;
++    if (!opportunity) {
++      return res.status(422).json({ error: "opportunity_missing", message: "This application's opportunity could not be found." });
++    }
++    const personalInfo = personalInfoResult.data as { legal_first_name: string; legal_last_name: string } | null;
++    const resume = resumeResult.data as { label: string | null } | null;
++
++    let skillNames: string[] = [];
++    if (application.resume_id) {
++      const { data: linkRows } = await supabase.from("resume_skill").select("skill_id").eq("resume_id", application.resume_id);
++      const skillIds = [...new Set(((linkRows ?? []) as unknown as Array<{ skill_id: string }>).map((l) => l.skill_id))];
++      if (skillIds.length > 0) {
++        const { data: skillRows } = await supabase.from("skill").select("name").in("id", skillIds);
++        skillNames = ((skillRows ?? []) as unknown as Array<{ name: string }>).map((s) => s.name);
++      }
++    }
++
++    const draft = generateCoverLetterDraft({
++      candidateName: personalInfo ? `${personalInfo.legal_first_name} ${personalInfo.legal_last_name}` : "[Your name]",
++      opportunityTitle: opportunity.title,
++      company: opportunity.company,
++      resumeLabel: resume?.label ?? null,
++      skillNames,
++    });
++
++    return res.status(200).json({ draft });
++  });
++
 +  router.post("/applications/:id/submit-to-ats", async (req: AuthedRequest, res) => {
 +    if (!env.EXTERNAL_ATS_SUBMISSION_ENABLED) {
 +      return res.status(403).json({
@@ -164,229 +244,80 @@ index f37d9f9..171e450 100644
 +      return res.status(404).json({ error: "candidate_not_found" });
 +    }
 +
-+    const { data: applicationRaw, error: applicationError } = await supabase
-+      .from("application")
-+      .select("id, status, resume_id, opportunity_id")
-+      .eq("id", idParsed.data)
-+      .maybeSingle();
-+    if (applicationError) {
-+      return res.status(400).json({ error: "application_fetch_failed", message: applicationError.message });
-+    }
-+    if (!applicationRaw) {
-+      return res.status(404).json({ error: "application_not_found" });
-+    }
-+    const application = applicationRaw as unknown as Pick<ApplicationDbRow, "id" | "status" | "resume_id" | "opportunity_id">;
++    const outcome = await attemptAtsSubmission(supabase, candidateId, idParsed.data, { dryRun: dry_run, comments }, APPLICATION_COLUMNS);
 +
-+    // Only SAVED or APPLYING may proceed — anything further along has
-+    // (per this application's own status history) already been submitted
-+    // or is past that point (REJECTED/OFFER/WITHDRAWN), and re-submitting
-+    // to the employer a second time is never the right default behavior.
-+    // A candidate who genuinely needs to resubmit can still do the whole
-+    // thing manually via "Open listing" — this route only ever guards its
-+    // own automated path, not the manual one.
-+    if (application.status !== "SAVED" && application.status !== "APPLYING") {
-+      return res.status(409).json({
-+        error: "application_not_eligible_for_submission",
-+        message: `Application status is ${application.status}; only SAVED or APPLYING applications can be auto-submitted.`,
-+      });
++    if (outcome.kind === "rejected") {
++      return res.status(outcome.httpStatus).json({ error: outcome.error, message: outcome.message });
 +    }
-+
-+    if (!application.resume_id) {
-+      return res.status(422).json({ error: "no_resume_selected", message: "This application has no resume_id set." });
++    if (outcome.kind === "dry_run") {
++      return res.status(200).json({ dry_run: true, would_submit: outcome.would_submit });
 +    }
-+
-+    const [opportunityResult, resumeResult, personalInfoResult] = await Promise.all([
-+      supabase.from("opportunity").select("id, application_url").eq("id", application.opportunity_id).maybeSingle(),
-+      supabase.from("resume").select("id, evidence_source_id").eq("id", application.resume_id).maybeSingle(),
-+      supabase
-+        .from("personal_info")
-+        .select("legal_first_name, legal_last_name, email, phone")
-+        .maybeSingle(),
-+    ]);
-+    if (opportunityResult.error || resumeResult.error || personalInfoResult.error) {
-+      const firstError = opportunityResult.error ?? resumeResult.error ?? personalInfoResult.error;
-+      return res.status(400).json({ error: "application_fetch_failed", message: firstError!.message });
++    if (outcome.kind === "submission_failed") {
++      return res.status(502).json({ error: "ats_submission_failed", message: outcome.message });
 +    }
-+
-+    const opportunity = opportunityResult.data as { id: string; application_url: string | null } | null;
-+    if (!opportunity?.application_url) {
-+      return res.status(422).json({ error: "opportunity_missing_application_url" });
-+    }
-+
-+    const leverRef = parseLeverPostingUrl(opportunity.application_url);
-+    if (!leverRef) {
-+      return res.status(422).json({
-+        error: "unsupported_ats",
-+        message: "Auto-submission currently only supports Lever-hosted postings (jobs.lever.co/...).",
-+      });
-+    }
-+
-+    const resume = resumeResult.data as { id: string; evidence_source_id: string | null } | null;
-+    if (!resume?.evidence_source_id) {
-+      return res.status(422).json({
-+        error: "resume_missing_file",
-+        message: "The selected resume has no attached document — nothing to submit as a resume file.",
-+      });
-+    }
-+
-+    const { data: evidenceSourceRaw, error: evidenceSourceError } = await supabase
-+      .from("evidence_source")
-+      .select("source_type, file_ref, title")
-+      .eq("id", resume.evidence_source_id)
-+      .maybeSingle();
-+    if (evidenceSourceError) {
-+      return res.status(400).json({ error: "application_fetch_failed", message: evidenceSourceError.message });
-+    }
-+    const evidenceSource = evidenceSourceRaw as { source_type: string; file_ref: string | null; title: string } | null;
-+    if (!evidenceSource || evidenceSource.source_type !== "document_upload" || !evidenceSource.file_ref) {
-+      return res.status(422).json({
-+        error: "resume_missing_file",
-+        message: "The selected resume's evidence source is not an uploaded document.",
-+      });
-+    }
-+
-+    const personalInfo = personalInfoResult.data as
-+      | { legal_first_name: string; legal_last_name: string; email: string; phone: string | null }
-+      | null;
-+    if (!personalInfo?.legal_first_name || !personalInfo.legal_last_name || !personalInfo.email) {
-+      return res.status(422).json({
-+        error: "personal_info_incomplete",
-+        message: "Legal name and email must be filled in under Profile before auto-submitting an application.",
-+      });
-+    }
-+
-+    const postingResult = await getLeverPosting(leverRef);
-+    if (!postingResult.ok) {
-+      return res.status(422).json({
-+        error: "ats_posting_unavailable",
-+        message: postingResult.message,
-+      });
-+    }
-+    if (postingResult.posting.state !== "published") {
-+      return res.status(422).json({
-+        error: "opportunity_closed",
-+        message: `This posting's current state on Lever is "${postingResult.posting.state}", not "published".`,
-+      });
-+    }
-+
-+    const wouldSubmit = {
-+      site: leverRef.site,
-+      posting_id: leverRef.postingId,
-+      posting_title: postingResult.posting.text,
-+      name: `${personalInfo.legal_first_name} ${personalInfo.legal_last_name}`,
-+      email: personalInfo.email,
-+      phone: personalInfo.phone ?? undefined,
-+      comments: comments ?? undefined,
-+      resume_title: evidenceSource.title,
-+    };
-+
-+    if (dry_run) {
-+      return res.status(200).json({ dry_run: true, would_submit: wouldSubmit });
-+    }
-+
-+    // Real submission from here on. Fetch the resume file's bytes via a
-+    // short-lived signed URL — same storage/RLS pattern as GET
-+    // /evidence-sources/:id/download-url, just consumed server-side
-+    // instead of handed to a client.
-+    const { data: signedUrlData, error: signedUrlError } = await supabase.storage
-+      .from(EVIDENCE_BUCKET)
-+      .createSignedUrl(evidenceSource.file_ref, DOWNLOAD_URL_EXPIRY_SECONDS);
-+    if (signedUrlError || !signedUrlData) {
-+      return res.status(502).json({
-+        error: "resume_file_unavailable",
-+        message: signedUrlError?.message ?? "Could not create a signed URL for the resume file.",
-+      });
-+    }
-+
-+    let resumeBytes: ArrayBuffer;
-+    let resumeContentType: string;
-+    try {
-+      const fileResponse = await fetch(signedUrlData.signedUrl);
-+      if (!fileResponse.ok) {
-+        throw new Error(`storage download returned ${fileResponse.status}`);
-+      }
-+      resumeBytes = await fileResponse.arrayBuffer();
-+      resumeContentType = fileResponse.headers.get("content-type") ?? "application/octet-stream";
-+    } catch (err) {
-+      return res.status(502).json({
-+        error: "resume_file_download_failed",
-+        message: err instanceof Error ? err.message : "unknown error downloading resume file",
-+      });
-+    }
-+
-+    const filename = evidenceSource.file_ref.split("/").pop() ?? "resume";
-+    const submitResult = await submitLeverApplication(leverRef, {
-+      name: wouldSubmit.name,
-+      email: wouldSubmit.email,
-+      phone: wouldSubmit.phone,
-+      comments: wouldSubmit.comments,
-+      resumeFile: { bytes: resumeBytes, filename, contentType: resumeContentType },
-+    });
-+
-+    if (!submitResult.ok) {
-+      await supabase.from("application").update({ ats_submission_error: submitResult.message }).eq("id", application.id);
-+      return res.status(502).json({ error: "ats_submission_failed", message: submitResult.message });
-+    }
-+
-+    // Success: advance the status machine to APPLIED, going through
-+    // APPLYING first if this application was still SAVED — the DB
-+    // trigger (0018_application.sql's check_application_status_transition)
-+    // does not allow SAVED -> APPLIED directly, same rule PATCH /status is
-+    // already subject to. Each hop writes its own application_status_event,
-+    // same convention as PATCH /status.
-+    let currentStatus = application.status;
-+    if (currentStatus === "SAVED") {
-+      await supabase.from("application").update({ status: "APPLYING" }).eq("id", application.id);
-+      await supabase.from("application_status_event").insert({
-+        application_id: application.id,
-+        candidate_id: candidateId,
-+        from_status: "SAVED",
-+        to_status: "APPLYING",
-+        note: "Auto-advanced by submit-to-ats before external submission.",
-+      });
-+      currentStatus = "APPLYING";
-+    }
-+
-+    const { data: finalRaw, error: finalError } = await supabase
-+      .from("application")
-+      .update({
-+        status: "APPLIED",
-+        ats_provider: "lever",
-+        ats_submitted_at: new Date().toISOString(),
-+        ats_submission_error: null,
-+      })
-+      .eq("id", application.id)
-+      .select(APPLICATION_COLUMNS)
-+      .maybeSingle();
-+    if (finalError || !finalRaw) {
-+      // The submission to Lever already succeeded — this failure is only
-+      // our own tracking update, so it must not be reported as a failed
-+      // submission (that would risk a caller retrying and double-applying).
-+      return res.status(200).json({
-+        submitted: true,
-+        warning: "Application was submitted to Lever successfully, but updating this application's tracked status failed.",
-+        message: finalError?.message,
-+      });
-+    }
-+
-+    await supabase.from("application_status_event").insert({
-+      application_id: application.id,
-+      candidate_id: candidateId,
-+      from_status: currentStatus,
-+      to_status: "APPLIED",
-+      note: "Submitted via Lever (submit-to-ats).",
-+    });
-+
-+    return res.status(200).json({ submitted: true, application: finalRaw });
++    // outcome.kind === "submitted"
++    return res.status(200).json({ submitted: true, application: outcome.application, warning: outcome.warning });
 +  });
 +
    return router;
  }
 diff --git a/api/src/routes/opportunity-feed.ts b/api/src/routes/opportunity-feed.ts
-index 8c78534..4b62bdd 100644
+index 8c78534..b4fa18b 100644
 --- a/api/src/routes/opportunity-feed.ts
 +++ b/api/src/routes/opportunity-feed.ts
-@@ -574,9 +574,47 @@ export function opportunityFeedRouter(): Router {
+@@ -87,7 +87,10 @@
+ import type { SupabaseClient } from "@supabase/supabase-js";
+ import { Router } from "express";
+ import type { AuthedRequest } from "../middleware/auth.js";
+-import { OpportunityInboxUpdateSchema, BulkApplyRequestSchema, UuidParamSchema } from "../lib/schemas.js";
++import type { Env } from "../lib/env.js";
++import { OpportunityInboxUpdateSchema, BulkApplyRequestSchema, BulkSubmitToAtsRequestSchema, UuidParamSchema } from "../lib/schemas.js";
++import { attemptAtsSubmission, type AtsSubmissionOutcome, type WouldSubmitPreview } from "../lib/ats/attemptAtsSubmission.js";
++import { APPLICATION_COLUMNS } from "./application.js";
+ import {
+   buildOpportunityFeed,
+   buildDedupKey,
+@@ -174,6 +177,30 @@ interface BulkApplyResult {
+   error?: string;
+ }
+ 
++// Gate R8 follow-up — one entry per selected match in
++// POST /opportunity-matches/bulk-submit-to-ats's response.
++interface BulkSubmitToAtsResult {
++  opportunity_match_id: string;
++  status: "submitted" | "dry_run" | "rejected" | "failed";
++  application_id?: string;
++  error?: string;
++  message?: string;
++  would_submit?: WouldSubmitPreview;
++}
++
++function toBulkSubmitResult(opportunityMatchId: string, applicationId: string, outcome: AtsSubmissionOutcome): BulkSubmitToAtsResult {
++  if (outcome.kind === "rejected") {
++    return { opportunity_match_id: opportunityMatchId, application_id: applicationId, status: "rejected", error: outcome.error, message: outcome.message };
++  }
++  if (outcome.kind === "dry_run") {
++    return { opportunity_match_id: opportunityMatchId, application_id: applicationId, status: "dry_run", would_submit: outcome.would_submit };
++  }
++  if (outcome.kind === "submission_failed") {
++    return { opportunity_match_id: opportunityMatchId, application_id: applicationId, status: "failed", error: "ats_submission_failed", message: outcome.message };
++  }
++  return { opportunity_match_id: opportunityMatchId, application_id: applicationId, status: "submitted", message: outcome.warning };
++}
++
+ /**
+  * One selected match, start to finish: find-or-create the candidate's own
+  * `opportunity` row for its underlying opportunity_source — checking
+@@ -434,7 +461,7 @@ async function applyOneMatch(
+   };
+ }
+ 
+-export function opportunityFeedRouter(): Router {
++export function opportunityFeedRouter(env: Env): Router {
+   const router = Router();
+ 
+   router.get("/opportunity-feed", async (req: AuthedRequest, res) => {
+@@ -574,9 +601,47 @@ export function opportunityFeedRouter(): Router {
  
      const items = buildOpportunityFeed(matches, sources);
  
@@ -435,15 +366,107 @@ index 8c78534..4b62bdd 100644
        resume_groups: resumeGroups,
      });
    });
+@@ -684,5 +749,89 @@ export function opportunityFeedRouter(): Router {
+     return res.status(200).json({ results, summary });
+   });
+ 
++  // Gate R8 follow-up — the bulk version of submit-to-ats. Reuses
++  // applyOneMatch (above) to resolve-or-create the tracked application
++  // behind each selected match, exactly like bulk-apply does, then runs
++  // the SAME attemptAtsSubmission() core logic POST
++  // /applications/:id/submit-to-ats uses — see that function's own file
++  // for why it was extracted, and docs/gate-r8-lever-ats-submission.md
++  // for the underlying Lever-only/base-fields-only limits this inherits
++  // unchanged. This route adds nothing new to what's supported; it's
++  // purely "do the same thing N times, sequentially, with isolated
++  // per-item results" — same posture as bulk-apply's own loop above,
++  // and for the same reason: several dependent writes per item, no
++  // benefit to parallelizing against a connection with no client-side
++  // pooling, and much easier partial-failure reporting done one at a
++  // time.
++  router.post("/opportunity-matches/bulk-submit-to-ats", async (req: AuthedRequest, res) => {
++    if (!env.EXTERNAL_ATS_SUBMISSION_ENABLED) {
++      return res.status(403).json({
++        error: "external_ats_submission_disabled",
++        message: "External ATS submission is disabled on this server (EXTERNAL_ATS_SUBMISSION_ENABLED is not set).",
++      });
++    }
++
++    const parsed = BulkSubmitToAtsRequestSchema.safeParse(req.body);
++    if (!parsed.success) {
++      return res.status(400).json({ error: "invalid_request", details: parsed.error.flatten() });
++    }
++
++    const supabase = req.supabase!;
++    const candidateId = await getOwnCandidateId(req);
++    if (!candidateId) {
++      return res.status(404).json({ error: "candidate_not_found" });
++    }
++
++    const results: BulkSubmitToAtsResult[] = [];
++    for (const opportunityMatchId of parsed.data.opportunity_match_ids) {
++      const applyResult = await applyOneMatch(supabase, candidateId, opportunityMatchId);
++      if (applyResult.status === "failed") {
++        results.push({ opportunity_match_id: opportunityMatchId, status: "rejected", error: applyResult.error ?? "could_not_track_application" });
++        continue;
++      }
++
++      // applyOneMatch's "applied" result carries application_id directly;
++      // "already_applied" only carries opportunity_id (see that
++      // interface's own comment on why — the match row itself never
++      // needs to know which application it became). One extra lookup
++      // to resolve it in that case, same as the frontend's own
++      // resolveApplicationId did before this server-side route existed
++      // (see pages/opportunityFeed.ts) — done here now instead, so a
++      // bulk caller gets it in one round trip rather than needing its
++      // own follow-up query per already-tracked item.
++      let applicationId = applyResult.application_id;
++      if (!applicationId && applyResult.opportunity_id) {
++        const { data: existingApplication } = await supabase
++          .from("application")
++          .select("id")
++          .eq("opportunity_id", applyResult.opportunity_id)
++          .maybeSingle();
++        applicationId = (existingApplication as { id: string } | null)?.id;
++      }
++      if (!applicationId) {
++        results.push({ opportunity_match_id: opportunityMatchId, status: "rejected", error: "could_not_resolve_application" });
++        continue;
++      }
++
++      const outcome = await attemptAtsSubmission(
++        supabase,
++        candidateId,
++        applicationId,
++        { dryRun: parsed.data.dry_run, comments: parsed.data.comments },
++        APPLICATION_COLUMNS,
++      );
++      results.push(toBulkSubmitResult(opportunityMatchId, applicationId, outcome));
++    }
++
++    const summary = {
++      submitted: results.filter((r) => r.status === "submitted").length,
++      dry_run: results.filter((r) => r.status === "dry_run").length,
++      rejected: results.filter((r) => r.status === "rejected").length,
++      failed: results.filter((r) => r.status === "failed").length,
++    };
++
++    return res.status(200).json({ results, summary });
++  });
++
+   return router;
+ }
 diff --git a/api/src/server.ts b/api/src/server.ts
-index 5ea2e7c..c41466e 100644
+index 5ea2e7c..f8def0b 100644
 --- a/api/src/server.ts
 +++ b/api/src/server.ts
-@@ -163,7 +163,7 @@ export function createApp(env: Env): Express {
+@@ -162,8 +162,8 @@ export function createApp(env: Env): Express {
+   app.use(requireAuth(env), truthCenterRouter());
    app.use(requireAuth(env), todayRouter());
    app.use(requireAuth(env), opportunityRouter());
-   app.use(requireAuth(env), opportunityFeedRouter());
+-  app.use(requireAuth(env), opportunityFeedRouter());
 -  app.use(requireAuth(env), applicationRouter());
++  app.use(requireAuth(env), opportunityFeedRouter(env));
 +  app.use(requireAuth(env), applicationRouter(env));
    app.use(requireAuth(env), applicationNoteRouter());
    app.use(requireAuth(env), resumeRouter());
@@ -558,10 +581,65 @@ index b2c3082..f9608aa 100644
    });
  
 diff --git a/api/tests/opportunity-feed.route.test.ts b/api/tests/opportunity-feed.route.test.ts
-index 3352c10..a86d37e 100644
+index 3352c10..0108bec 100644
 --- a/api/tests/opportunity-feed.route.test.ts
 +++ b/api/tests/opportunity-feed.route.test.ts
-@@ -74,7 +74,7 @@ function queryResult(data: unknown, error: { message: string; code?: string } |
+@@ -1,7 +1,22 @@
+ import { describe, it, expect, vi } from "vitest";
+ import type { Response } from "express";
+ import type { AuthedRequest } from "../src/middleware/auth.js";
+-import { opportunityFeedRouter } from "../src/routes/opportunity-feed.js";
++import type { Env } from "../src/lib/env.js";
++import type { AtsSubmissionOutcome, AtsApplicationRow } from "../src/lib/ats/attemptAtsSubmission.js";
++
++// Gate R8 follow-up (bulk-submit-to-ats tests below): mocked at module
++// level rather than re-building attemptAtsSubmission's own full DB/fetch
++// dependency chain (evidence_source, personal_info, opportunity, Lever
++// fetch) a second time here — that chain already has 10 dedicated tests
++// in application.submit-to-ats.test.ts. This file's job is to test the
++// BULK ROUTE's own orchestration (resolving each match to an
++// application, isolating one item's failure from the rest, summary
++// counts) — not to re-verify attemptAtsSubmission's internals.
++vi.mock("../src/lib/ats/attemptAtsSubmission.js", () => ({ attemptAtsSubmission: vi.fn() }));
++const { attemptAtsSubmission } = await import("../src/lib/ats/attemptAtsSubmission.js");
++const attemptAtsSubmissionMock = attemptAtsSubmission as unknown as ReturnType<typeof vi.fn>;
++
++const { opportunityFeedRouter } = await import("../src/routes/opportunity-feed.js");
+ 
+ interface RouteLayer {
+   route?: {
+@@ -11,8 +26,28 @@ interface RouteLayer {
+   };
+ }
+ 
+-function getHandlers(method: "get" | "patch" | "post", path: string) {
+-  const router = opportunityFeedRouter() as unknown as { stack: RouteLayer[] };
++// Gate R8 follow-up: opportunityFeedRouter now takes env (for the bulk
++// submit-to-ats kill switch). Every pre-existing test in this file is
++// unaffected by the flag's value; only the new
++// "POST /opportunity-matches/bulk-submit-to-ats" tests care — so this
++// default just needs to be *a* valid Env, with the flag on so those
++// tests can reach past the switch, same rationale as
++// application.route.test.ts's own TEST_ENV.
++const TEST_ENV: Env = {
++  SUPABASE_URL: "https://example.supabase.co",
++  SUPABASE_ANON_KEY: "anon-key",
++  SUPABASE_SERVICE_ROLE_KEY: "service-role-key",
++  PORT: 3000,
++  CONSENT_POLICY_VERSION: "v1.0",
++  NODE_ENV: "test",
++  RATE_LIMIT_WINDOW_MINUTES: 15,
++  SIGNUP_RATE_LIMIT_MAX: 5,
++  EXTERNAL_ATS_SUBMISSION_ENABLED: true,
++};
++const DISABLED_ENV: Env = { ...TEST_ENV, EXTERNAL_ATS_SUBMISSION_ENABLED: false };
++
++function getHandlers(method: "get" | "patch" | "post", path: string, env: Env = TEST_ENV) {
++  const router = opportunityFeedRouter(env) as unknown as { stack: RouteLayer[] };
+   const layer = router.stack.find((l) => l.route?.path === path && l.route?.methods[method]);
+   if (!layer?.route) throw new Error(`no route registered for ${method.toUpperCase()} ${path}`);
+   return layer.route.stack.map((s) => s.handle);
+@@ -74,7 +109,7 @@ function queryResult(data: unknown, error: { message: string; code?: string } |
  }
  
  const CANDIDATE_ID = "cand-1";
@@ -570,7 +648,7 @@ index 3352c10..a86d37e 100644
  const SOURCE_ID = "source-1";
  
  const ACTIVE_SOURCE_ROW = {
-@@ -109,6 +109,8 @@ function makeSupabaseMock(opts: {
+@@ -109,6 +144,8 @@ function makeSupabaseMock(opts: {
    activeResumeList?: { data: unknown; error: { message: string } | null };
    resumeOwnership?: { data: unknown; error: { message: string } | null };
    resumeScopedMatchList?: { data: unknown; error: { message: string } | null };
@@ -579,7 +657,7 @@ index 3352c10..a86d37e 100644
  } = {}) {
    const {
      candidate = { id: CANDIDATE_ID },
-@@ -119,6 +121,7 @@ function makeSupabaseMock(opts: {
+@@ -119,6 +156,7 @@ function makeSupabaseMock(opts: {
      activeResumeList = { data: [], error: null },
      resumeOwnership = { data: { id: "resume-1" }, error: null },
      resumeScopedMatchList = { data: [], error: null },
@@ -587,7 +665,7 @@ index 3352c10..a86d37e 100644
    } = opts;
  
    const fromSpy = vi.fn();
-@@ -170,6 +173,11 @@ function makeSupabaseMock(opts: {
+@@ -170,6 +208,11 @@ function makeSupabaseMock(opts: {
          }),
        };
      }
@@ -599,7 +677,7 @@ index 3352c10..a86d37e 100644
      return queryResult([], null);
    };
  
-@@ -479,6 +487,56 @@ describe("GET /opportunity-feed", () => {
+@@ -479,6 +522,56 @@ describe("GET /opportunity-feed", () => {
  
      expect(res.status).toHaveBeenCalledWith(400);
    });
@@ -656,7 +734,7 @@ index 3352c10..a86d37e 100644
  });
  
  describe("PATCH /opportunity-matches/:id/inbox", () => {
-@@ -594,7 +652,7 @@ describe("PATCH /opportunity-matches/:id/inbox", () => {
+@@ -594,7 +687,7 @@ describe("PATCH /opportunity-matches/:id/inbox", () => {
      expect(res.status).toHaveBeenCalledWith(400);
    });
  
@@ -665,7 +743,7 @@ index 3352c10..a86d37e 100644
  
    it("accepts promoted_opportunity_id alone (no inbox_status/is_priority required)", async () => {
      const supabase = makeSupabaseMock({
-@@ -681,11 +739,11 @@ describe("PATCH /opportunity-matches/:id/inbox", () => {
+@@ -681,11 +774,11 @@ describe("PATCH /opportunity-matches/:id/inbox", () => {
  
  // ── Gate R5: POST /opportunity-matches/bulk-apply ──────────────────────
  
@@ -682,6 +760,169 @@ index 3352c10..a86d37e 100644
  
  const SOURCE_ROW_TEMPLATE = {
    source_type: "job_board",
+@@ -719,6 +812,11 @@ function makeBulkApplyMock(opts: {
+   createApplicationError?: { message: string; code?: string } | null;
+   applicationInserts?: Array<Record<string, unknown>>; // spy target
+   opportunityInserts?: Array<Record<string, unknown>>; // spy target
++  // Gate R8 follow-up — for bulk-submit-to-ats's "already_applied"
++  // resolution lookup (select application.id by opportunity_id), keyed
++  // by opportunity_id. Empty object means "not found" for every id,
++  // same convention as the other keyed-record options above.
++  applicationByOpportunityId?: Record<string, { id: string } | null>;
+   // Gate R6 — the candidate's other opportunity_source-backed
+   // opportunities, considered for the fuzzy dedup check. Defaults to []
+   // (no fuzzy match found), same "unchanged behavior unless configured"
+@@ -735,6 +833,7 @@ function makeBulkApplyMock(opts: {
+     applicationInserts = [],
+     opportunityInserts = [],
+     fuzzyCandidateOpportunities = [],
++    applicationByOpportunityId = {},
+   } = opts;
+ 
+   let opportunityInsertCount = 0;
+@@ -805,6 +904,15 @@ function makeBulkApplyMock(opts: {
+       }
+       if (table === "application") {
+         return {
++          // Gate R8 follow-up: bulk-submit-to-ats's own resolution
++          // lookup for applyOneMatch's "already_applied" result (which
++          // carries opportunity_id, not application_id — see that
++          // interface's own comment on why).
++          select: () => ({
++            eq: (_c: string, opportunityId: string) => ({
++              maybeSingle: async () => ({ data: applicationByOpportunityId[opportunityId] ?? null, error: null }),
++            }),
++          }),
+           insert: (payload: Record<string, unknown>) => {
+             applicationInserts.push(payload);
+             return {
+@@ -1090,3 +1198,126 @@ describe("POST /opportunity-matches/bulk-apply (Gate R5)", () => {
+     expect(body.results[0].opportunity_id).toBe("exact-match-opportunity");
+   });
+ });
++
++describe("POST /opportunity-matches/bulk-submit-to-ats (Gate R8 follow-up)", () => {
++  it("returns 403 when EXTERNAL_ATS_SUBMISSION_ENABLED is off, before touching applyOneMatch or attemptAtsSubmission at all", async () => {
++    const supabase = makeBulkApplyMock();
++    const req = { supabase, body: { opportunity_match_ids: [MATCH_A_ID] } } as unknown as AuthedRequest;
++    const res = makeRes();
++
++    await runRoute(getHandlers("post", "/opportunity-matches/bulk-submit-to-ats", DISABLED_ENV), req, res);
++
++    expect(res.status).toHaveBeenCalledWith(403);
++    expect(attemptAtsSubmissionMock).not.toHaveBeenCalled();
++  });
++
++  it("returns 400 for more than 5 ids — a much lower cap than bulk-apply's 20, since these are real submissions", async () => {
++    const supabase = makeBulkApplyMock();
++    const req = { supabase, body: { opportunity_match_ids: new Array(6).fill(MATCH_A_ID) } } as unknown as AuthedRequest;
++    const res = makeRes();
++
++    await runRoute(getHandlers("post", "/opportunity-matches/bulk-submit-to-ats"), req, res);
++
++    expect(res.status).toHaveBeenCalledWith(400);
++    expect(attemptAtsSubmissionMock).not.toHaveBeenCalled();
++  });
++
++  it("resolves a freshly-tracked match's new application_id and passes it to attemptAtsSubmission", async () => {
++    attemptAtsSubmissionMock.mockReset();
++    attemptAtsSubmissionMock.mockResolvedValueOnce({ kind: "dry_run", would_submit: { site: "acme", posting_id: "p1", posting_title: "Intern", name: "Ada Lovelace", email: "ada@example.com", resume_title: "Resume" } } satisfies AtsSubmissionOutcome);
++    const supabase = makeBulkApplyMock({
++      matches: { [MATCH_A_ID]: { id: MATCH_A_ID, opportunity_source_id: SOURCE_A_ID, resume_id: RESUME_ID, promoted_opportunity_id: null } },
++      sources: { [SOURCE_A_ID]: { id: SOURCE_A_ID, ...SOURCE_ROW_TEMPLATE } },
++    });
++    const req = { supabase, body: { opportunity_match_ids: [MATCH_A_ID], dry_run: true } } as unknown as AuthedRequest;
++    const res = makeRes();
++
++    await runRoute(getHandlers("post", "/opportunity-matches/bulk-submit-to-ats"), req, res);
++
++    expect(res.status).toHaveBeenCalledWith(200);
++    expect(attemptAtsSubmissionMock).toHaveBeenCalledTimes(1);
++    expect(attemptAtsSubmissionMock.mock.calls[0][2]).toBe("app-1"); // application id — see makeBulkApplyMock's insert stub
++    expect(attemptAtsSubmissionMock.mock.calls[0][3]).toEqual({ dryRun: true, comments: undefined });
++    const body = res.body as { results: Array<{ status: string; application_id?: string }> };
++    expect(body.results[0]).toEqual(expect.objectContaining({ opportunity_match_id: MATCH_A_ID, status: "dry_run", application_id: "app-1" }));
++  });
++
++  it("resolves an already-tracked match's existing application_id via the opportunity_id lookup", async () => {
++    attemptAtsSubmissionMock.mockReset();
++    attemptAtsSubmissionMock.mockResolvedValueOnce({
++      kind: "submitted",
++      application: { id: "existing-app-9", status: "APPLIED" } as unknown as AtsApplicationRow,
++    } as AtsSubmissionOutcome);
++    const supabase = makeBulkApplyMock({
++      matches: { [MATCH_A_ID]: { id: MATCH_A_ID, opportunity_source_id: SOURCE_A_ID, resume_id: null, promoted_opportunity_id: "prior-opportunity-1" } },
++      applicationByOpportunityId: { "prior-opportunity-1": { id: "existing-app-9" } },
++    });
++    const req = { supabase, body: { opportunity_match_ids: [MATCH_A_ID], dry_run: false } } as unknown as AuthedRequest;
++    const res = makeRes();
++
++    await runRoute(getHandlers("post", "/opportunity-matches/bulk-submit-to-ats"), req, res);
++
++    expect(attemptAtsSubmissionMock.mock.calls[0][2]).toBe("existing-app-9");
++    const body = res.body as { results: Array<{ status: string; application_id?: string }> };
++    expect(body.results[0]).toEqual(expect.objectContaining({ opportunity_match_id: MATCH_A_ID, status: "submitted", application_id: "existing-app-9" }));
++  });
++
++  it("reports could_not_resolve_application, and skips attemptAtsSubmission entirely, when an already-tracked match's application can't be found", async () => {
++    attemptAtsSubmissionMock.mockReset();
++    const supabase = makeBulkApplyMock({
++      matches: { [MATCH_A_ID]: { id: MATCH_A_ID, opportunity_source_id: SOURCE_A_ID, resume_id: null, promoted_opportunity_id: "prior-opportunity-1" } },
++      applicationByOpportunityId: {}, // lookup finds nothing
++    });
++    const req = { supabase, body: { opportunity_match_ids: [MATCH_A_ID] } } as unknown as AuthedRequest;
++    const res = makeRes();
++
++    await runRoute(getHandlers("post", "/opportunity-matches/bulk-submit-to-ats"), req, res);
++
++    expect(attemptAtsSubmissionMock).not.toHaveBeenCalled();
++    const body = res.body as { results: Array<{ status: string; error?: string }> };
++    expect(body.results[0]).toEqual(expect.objectContaining({ status: "rejected", error: "could_not_resolve_application" }));
++  });
++
++  it("isolates one item's failure from the rest: a bad match id doesn't stop the remaining ones", async () => {
++    attemptAtsSubmissionMock.mockReset();
++    attemptAtsSubmissionMock.mockResolvedValueOnce({ kind: "dry_run", would_submit: { site: "acme", posting_id: "p1", posting_title: "Intern", name: "Ada", email: "ada@example.com", resume_title: "R" } } satisfies AtsSubmissionOutcome);
++    const supabase = makeBulkApplyMock({
++      matches: {
++        [MATCH_A_ID]: null, // not found -> applyOneMatch reports "failed"
++        [MATCH_B_ID]: { id: MATCH_B_ID, opportunity_source_id: SOURCE_A_ID, resume_id: RESUME_ID, promoted_opportunity_id: null },
++      },
++      sources: { [SOURCE_A_ID]: { id: SOURCE_A_ID, ...SOURCE_ROW_TEMPLATE } },
++    });
++    const req = { supabase, body: { opportunity_match_ids: [MATCH_A_ID, MATCH_B_ID] } } as unknown as AuthedRequest;
++    const res = makeRes();
++
++    await runRoute(getHandlers("post", "/opportunity-matches/bulk-submit-to-ats"), req, res);
++
++    expect(res.status).toHaveBeenCalledWith(200);
++    const body = res.body as { results: Array<{ opportunity_match_id: string; status: string }>; summary: Record<string, number> };
++    expect(body.results).toHaveLength(2);
++    expect(body.results[0]).toEqual(expect.objectContaining({ opportunity_match_id: MATCH_A_ID, status: "rejected" }));
++    expect(body.results[1]).toEqual(expect.objectContaining({ opportunity_match_id: MATCH_B_ID, status: "dry_run" }));
++    expect(body.summary).toEqual({ submitted: 0, dry_run: 1, rejected: 1, failed: 0 });
++    // Only one call — the second match's own attempt, never a retry of the first.
++    expect(attemptAtsSubmissionMock).toHaveBeenCalledTimes(1);
++  });
++
++  it("maps a submission_failed outcome to a failed result without throwing", async () => {
++    attemptAtsSubmissionMock.mockReset();
++    attemptAtsSubmissionMock.mockResolvedValueOnce({ kind: "submission_failed", message: "Missing required field: phone" } satisfies AtsSubmissionOutcome);
++    const supabase = makeBulkApplyMock({
++      matches: { [MATCH_A_ID]: { id: MATCH_A_ID, opportunity_source_id: SOURCE_A_ID, resume_id: RESUME_ID, promoted_opportunity_id: null } },
++      sources: { [SOURCE_A_ID]: { id: SOURCE_A_ID, ...SOURCE_ROW_TEMPLATE } },
++    });
++    const req = { supabase, body: { opportunity_match_ids: [MATCH_A_ID], dry_run: false } } as unknown as AuthedRequest;
++    const res = makeRes();
++
++    await runRoute(getHandlers("post", "/opportunity-matches/bulk-submit-to-ats"), req, res);
++
++    const body = res.body as { results: Array<{ status: string; error?: string; message?: string }> };
++    expect(body.results[0]).toEqual(
++      expect.objectContaining({ status: "failed", error: "ats_submission_failed", message: "Missing required field: phone" }),
++    );
++  });
++});
 diff --git a/api/tests/opportunity.schema.test.ts b/api/tests/opportunity.schema.test.ts
 index 0355d49..d123367 100644
 --- a/api/tests/opportunity.schema.test.ts
@@ -749,7 +990,7 @@ index 0cd7705..db1ff4d 100644
  describe("ResumeCreateRequestSchema", () => {
    it("accepts a minimal valid record (label only)", () => {
 diff --git a/web/src/lib/api.ts b/web/src/lib/api.ts
-index edb4671..4740709 100644
+index edb4671..0f5001b 100644
 --- a/web/src/lib/api.ts
 +++ b/web/src/lib/api.ts
 @@ -479,6 +479,14 @@ export interface Application {
@@ -871,15 +1112,56 @@ index edb4671..4740709 100644
  }
  // Gate R3: a lightweight per-active-resume summary, always present
  // (empty array for a candidate with no active resumes) — see
+@@ -770,3 +868,39 @@ export const bulkApply = (opportunityMatchIds: string[]) =>
+   post<{ results: BulkApplyResult[]; summary: BulkApplySummary }>("/opportunity-matches/bulk-apply", {
+     opportunity_match_ids: opportunityMatchIds,
+   });
++
++// Gate R8 follow-up — the bulk version of submitApplicationToAts. Unlike
++// that function, this one does NOT fold per-item rejections into the
++// return value: the backend already reports each match's own
++// success/rejection/failure inside `results` (mirroring bulkApply's own
++// shape above), so a 200 here always means "the request was processed",
++// with per-item outcomes to inspect — not "every item succeeded". Only a
++// whole-request-level problem (403 disabled, 400 invalid ids/cap
++// exceeded, network/server error) throws ApiError, same as bulkApply.
++export interface BulkSubmitToAtsResult {
++  opportunity_match_id: string;
++  status: "submitted" | "dry_run" | "rejected" | "failed";
++  application_id?: string;
++  error?: string;
++  message?: string;
++  would_submit?: AtsSubmitDryRunResult["would_submit"];
++}
++export interface BulkSubmitToAtsSummary {
++  submitted: number;
++  dry_run: number;
++  rejected: number;
++  failed: number;
++}
++export const bulkSubmitApplicationsToAts = (opportunityMatchIds: string[], options: { dry_run: boolean; comments?: string }) =>
++  post<{ results: BulkSubmitToAtsResult[]; summary: BulkSubmitToAtsSummary }>("/opportunity-matches/bulk-submit-to-ats", {
++    opportunity_match_ids: opportunityMatchIds,
++    ...options,
++  });
++
++// Gate R8 follow-up — a TEMPLATED draft (candidate name, resume label,
++// matched skills, opportunity title/company), not AI-generated prose —
++// see api/src/lib/ats/coverLetterTemplate.ts's own header for why. Always
++// meant to be reviewed/edited before use; never auto-applied to a
++// submission without the candidate seeing it first (see
++// applicationDetail.ts's own use of this).
++export const getCoverLetterDraft = (applicationId: string) => get<{ draft: string }>(`/applications/${applicationId}/cover-letter-draft`).then((b) => b.draft);
 diff --git a/web/src/pages/applicationDetail.ts b/web/src/pages/applicationDetail.ts
-index 94e6a76..373e073 100644
+index 94e6a76..d21c408 100644
 --- a/web/src/pages/applicationDetail.ts
 +++ b/web/src/pages/applicationDetail.ts
-@@ -7,12 +7,15 @@ import {
+@@ -7,12 +7,16 @@ import {
    addApplicationNote,
    updateApplicationNote,
    deleteApplicationNote,
 +  submitApplicationToAts,
++  getCoverLetterDraft,
    ApiError,
    type Application,
    type ApplicationStatus,
@@ -891,7 +1173,7 @@ index 94e6a76..373e073 100644
  
  const TRANSITIONS: Record<ApplicationStatus, ApplicationStatus[]> = {
    SAVED: ["APPLYING", "WITHDRAWN"],
-@@ -67,6 +70,7 @@ export async function renderApplicationDetail(root: HTMLElement, applicationId:
+@@ -67,6 +71,7 @@ export async function renderApplicationDetail(root: HTMLElement, applicationId:
  
      main.append(renderTransitionBar());
      main.append(renderOpportunityCard());
@@ -899,7 +1181,7 @@ index 94e6a76..373e073 100644
      main.append(h("h2", { class: "section-title" }, ["Tracking details"]));
      main.append(renderEditForm());
      main.append(h("h2", { class: "section-title" }, ["Notes"]));
-@@ -113,6 +117,117 @@ export async function renderApplicationDetail(root: HTMLElement, applicationId:
+@@ -113,6 +118,151 @@ export async function renderApplicationDetail(root: HTMLElement, applicationId:
      }
    }
  
@@ -925,6 +1207,38 @@ index 94e6a76..373e073 100644
 +      body.append(h("div", { class: "form-error" }, [`Last attempt failed: ${application.ats_submission_error}`]));
 +    }
 +
++    let coverLetterText = "";
++    const coverLetterArea = h("textarea", {
++      class: "input",
++      rows: "6",
++      style: "width:100%; margin-top:8px;",
++      placeholder: "Optional — add a cover letter or note to include with this application.",
++      onInput: (e: Event) => {
++        coverLetterText = (e.target as HTMLTextAreaElement).value;
++      },
++    }, []) as HTMLTextAreaElement;
++
++    const generateDraftBtn = h(
++      "button",
++      {
++        class: "btn btn--small",
++        onClick: async () => {
++          generateDraftBtn.setAttribute("disabled", "");
++          try {
++            const draft = await getCoverLetterDraft(application.id);
++            coverLetterText = draft;
++            coverLetterArea.value = draft;
++          } catch (err) {
++            toast(errorMessage(err), "error");
++          } finally {
++            generateDraftBtn.removeAttribute("disabled");
++          }
++        },
++        title: "Fills in a template draft (name, resume, matched skills, opportunity) for you to edit — not AI-generated.",
++      },
++      ["Generate draft"],
++    );
++
 +    const previewArea = h("div", { style: "margin-top:10px" }, []);
 +
 +    const previewBtn = h(
@@ -935,7 +1249,7 @@ index 94e6a76..373e073 100644
 +          previewBtn.setAttribute("disabled", "");
 +          previewArea.innerHTML = "";
 +          previewArea.append(h("div", { class: "subtle" }, ["Checking the posting on Lever…"]));
-+          const result = await submitApplicationToAts(application.id, { dry_run: true });
++          const result = await submitApplicationToAts(application.id, { dry_run: true, comments: coverLetterText.trim() || undefined });
 +          previewBtn.removeAttribute("disabled");
 +          previewArea.innerHTML = "";
 +          if (!result.ok) {
@@ -947,7 +1261,7 @@ index 94e6a76..373e073 100644
 +            // but keeps the branch exhaustive for the type checker.
 +            return;
 +          }
-+          previewArea.append(renderDryRunPreview(result.would_submit));
++          previewArea.append(renderDryRunPreview(result.would_submit, coverLetterText));
 +        },
 +      },
 +      ["Preview auto-submit"],
@@ -958,7 +1272,9 @@ index 94e6a76..373e073 100644
 +        h("div", { class: "subtle", style: "margin-bottom:8px" }, [
 +          "Auto-submit this application through the employer's ATS, where supported (currently: Lever-hosted postings only, base fields only — no custom screening questions).",
 +        ]),
-+        h("div", { class: "btn-row" }, [previewBtn]),
++        h("div", { class: "btn-row" }, [generateDraftBtn]),
++        coverLetterArea,
++        h("div", { class: "btn-row", style: "margin-top:8px" }, [previewBtn]),
 +        previewArea,
 +      ]),
 +    );
@@ -966,7 +1282,7 @@ index 94e6a76..373e073 100644
 +    return h("div", { class: "card" }, [body]);
 +  }
 +
-+  function renderDryRunPreview(wouldSubmit: AtsSubmitDryRunResult["would_submit"]): HTMLElement {
++  function renderDryRunPreview(wouldSubmit: AtsSubmitDryRunResult["would_submit"], coverLetterText: string): HTMLElement {
 +    const submitBtn = h(
 +      "button",
 +      {
@@ -977,7 +1293,7 @@ index 94e6a76..373e073 100644
 +          }
 +          submitBtn.setAttribute("disabled", "");
 +          try {
-+            const result = await submitApplicationToAts(application.id, { dry_run: false });
++            const result = await submitApplicationToAts(application.id, { dry_run: false, comments: coverLetterText.trim() || undefined });
 +            if (!result.ok) {
 +              toast(atsErrorMessage(result.error, result.message), "error");
 +              submitBtn.removeAttribute("disabled");
@@ -1018,13 +1334,14 @@ index 94e6a76..373e073 100644
      const o = application.opportunity;
      if (!o) return h("div", {}, []);
 diff --git a/web/src/pages/opportunityFeed.ts b/web/src/pages/opportunityFeed.ts
-index b070c3b..9f4ba1a 100644
+index b070c3b..79a331d 100644
 --- a/web/src/pages/opportunityFeed.ts
 +++ b/web/src/pages/opportunityFeed.ts
-@@ -24,11 +24,14 @@ import {
+@@ -24,11 +24,15 @@ import {
    getOpportunityFeed,
    updateOpportunityMatchInbox,
    bulkApply,
++  bulkSubmitApplicationsToAts,
 +  listApplications,
 +  submitApplicationToAts,
    type OpportunityFeedItem,
@@ -1036,7 +1353,77 @@ index b070c3b..9f4ba1a 100644
  
  function pill(text: string, cls: string): HTMLElement {
    return h("span", { class: `pill pill--${cls}` }, [text]);
-@@ -232,6 +235,75 @@ export async function renderOpportunityFeed(root: HTMLElement) {
+@@ -171,12 +175,69 @@ export async function renderOpportunityFeed(root: HTMLElement) {
+       }
+     }
+ 
++    // Gate R8 follow-up — of the selected matches, only the ones that
++    // are (a) Lever-hosted and (b) not already auto-submitted are worth
++    // sending to the bulk endpoint at all; filtering client-side first
++    // avoids a confusing "N rejected" summary full of items that were
++    // never going to qualify. The backend's own 5-item cap
++    // (BulkSubmitToAtsRequestSchema) is still the authority — this is
++    // just a courtesy trim so the confirm dialog's count matches what
++    // will actually be attempted.
++    const MAX_BULK_SUBMIT = 5;
++    const eligibleForAutoApply = [...selected].filter((id) => {
++      const item = items.find((i) => i.opportunity_match_id === id);
++      return item ? isLeverPostingUrl(item.application_url) && !item.ats_submitted_at : false;
++    });
++    const autoApplyIds = eligibleForAutoApply.slice(0, MAX_BULK_SUBMIT);
++    const truncatedCount = eligibleForAutoApply.length - autoApplyIds.length;
++
++    async function autoApplySelected() {
++      try {
++        const preview = await bulkSubmitApplicationsToAts(autoApplyIds, { dry_run: true });
++        const eligible = preview.results.filter((r) => r.status === "dry_run");
++        if (eligible.length === 0) {
++          toast("None of the selected matches could be auto-submitted right now.", "error");
++          return;
++        }
++        const summaryLines = eligible.map((r) => `• ${r.would_submit?.posting_title ?? r.opportunity_match_id}`).join("\n");
++        const skipped = preview.results.length - eligible.length;
++        const confirmed = confirm(
++          `Submit ${eligible.length} application(s) to Lever now?\n\n${summaryLines}\n\n` +
++            (skipped > 0 ? `${skipped} other selected match(es) aren't eligible and will be skipped.\n\n` : "") +
++            (truncatedCount > 0 ? `${truncatedCount} more selected match(es) were left out of this batch (limit ${MAX_BULK_SUBMIT} at a time).\n\n` : "") +
++            "This sends real applications to these employers and can't be undone.",
++        );
++        if (!confirmed) return;
++
++        const { results, summary } = await bulkSubmitApplicationsToAts(eligible.map((r) => r.opportunity_match_id), { dry_run: false });
++        for (const result of results) {
++          if (result.status !== "submitted") continue;
++          const item = items.find((i) => i.opportunity_match_id === result.opportunity_match_id);
++          if (item) {
++            item.ats_provider = "lever";
++            item.ats_submitted_at = new Date().toISOString();
++          }
++        }
++        const parts = [`${summary.submitted} submitted`];
++        if (summary.failed > 0) parts.push(`${summary.failed} failed`);
++        if (summary.rejected > 0) parts.push(`${summary.rejected} rejected`);
++        toast(parts.join(", ") + ".", summary.failed > 0 || summary.rejected > 0 ? "error" : "success");
++        selected.clear();
++        draw();
++      } catch (err) {
++        toast(errorMessage(err), "error");
++      }
++    }
++
+     return h("div", { class: "card", style: "margin-top:16px" }, [
+       h("div", { class: "spread" }, [
+         h("div", {}, [`${selected.size} selected`]),
+         h("div", { class: "btn-row" }, [
+           h("button", { class: "btn btn--small", onClick: () => { selected.clear(); draw(); } }, ["Clear"]),
+           h("button", { class: "btn btn--small btn--primary", onClick: applySelected }, ["Start applications"]),
++          autoApplyIds.length > 0
++            ? h("button", { class: "btn btn--small btn--primary", onClick: autoApplySelected }, [`⚡ Auto-apply ${autoApplyIds.length} (Lever)`])
++            : null,
+         ]),
+       ]),
+     ]);
+@@ -232,6 +293,75 @@ export async function renderOpportunityFeed(root: HTMLElement) {
        }
      }
  
@@ -1112,7 +1499,7 @@ index b070c3b..9f4ba1a 100644
      const metaParts = [item.company];
      if (item.location) metaParts.push(item.location);
      if (item.work_mode) metaParts.push(item.work_mode);
-@@ -253,6 +325,13 @@ export async function renderOpportunityFeed(root: HTMLElement) {
+@@ -253,6 +383,13 @@ export async function renderOpportunityFeed(root: HTMLElement) {
      }
  
      const alreadyApplied = item.promoted_opportunity_id !== null;
@@ -1126,7 +1513,7 @@ index b070c3b..9f4ba1a 100644
  
      // Gate R7: bulk-select checkbox — omitted entirely once an item is
      // already applied (nothing left to select it for).
-@@ -305,6 +384,7 @@ export async function renderOpportunityFeed(root: HTMLElement) {
+@@ -305,6 +442,7 @@ export async function renderOpportunityFeed(root: HTMLElement) {
            h("button", { class: "btn btn--small btn--primary", onClick: apply, disabled: alreadyApplied }, [
              alreadyApplied ? "Application started" : "Start application",
            ]),
