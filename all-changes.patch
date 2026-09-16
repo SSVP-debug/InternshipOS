@@ -1,3 +1,132 @@
+diff --git a/PROGRESS.md b/PROGRESS.md
+index c37282f..54a53d0 100644
+--- a/PROGRESS.md
++++ b/PROGRESS.md
+@@ -1,5 +1,124 @@
+ # InternshipOS — Progress
+ 
++## 2026-09-15 — Gate R8: real external ATS submission (Lever), bulk variant, cover-letter draft
++
++This entry is newer than everything below it. Verified by actually
++running the code — full test suites, all typecheck configs, both
++production builds, and (for the RLS change specifically) a real local
++Postgres 16 run of the entire migration chain + RLS suite, not just a
++read-through.
++
++**Why this gate exists:** reverses part of the prior Gate R0 decision
++that real form-submission/browser automation was out of scope — but
++narrowly, not wholesale. Full reasoning, scope boundaries, and
++explicitly-declined alternatives live in
++`docs/gate-r8-lever-ats-submission.md`; this entry is the handover
++summary, not a replacement for that doc.
++
++**What shipped:**
++- `POST /applications/:id/submit-to-ats` — submits one application for
++  real, through Lever's public postings-apply endpoint. Lever only:
++  Greenhouse and other major ATS platforms do not have an equivalent
++  public, candidate-usable submission API (checked, not assumed — an
++  earlier claim that Greenhouse did was wrong and corrected).
++- `POST /opportunity-matches/bulk-submit-to-ats` — bulk variant, capped
++  at 5 (vs. bulk-apply's 20 — these are real, irreversible external
++  actions, not internal tracking). Shares `attemptAtsSubmission.ts`
++  (new) with the single-item route rather than duplicating ~180 lines
++  of eligibility logic — refactored the original route down to a thin
++  wrapper around this shared function first, and confirmed the refactor
++  was behavior-preserving before building the bulk route on top of it.
++- `GET /applications/:id/cover-letter-draft` — a **templated**, not
++  AI-generated, draft (`coverLetterTemplate.ts`) built from data already
++  on file (name, resume label, matched skills, opportunity title/
++  company). This codebase has no LLM integration and none was added —
++  real AI generation is flagged as its own explicit decision, not
++  assumed.
++- Migration `0030_application_ats_submission.sql` —
++  `ats_provider`/`ats_external_id`/`ats_submitted_at`/
++  `ats_submission_error` on `application`. No new RLS policy (inherits
++  `application_update_own`/`application_select_own`) — added a dedicated
++  RLS test (Test 13, `test_application_ownership.sql`) confirming that
++  inheritance actually holds rather than leaving it asserted-but-untested.
++- Two independent safety layers on every submission path:
++  `EXTERNAL_ATS_SUBMISSION_ENABLED` (server-wide kill switch, default
++  off — deliberately NOT `z.coerce.boolean()`, which parses the literal
++  string `"false"` as `true`; caught and fixed before shipping) and
++  `dry_run` (per-request, defaults `true`).
++- Frontend: single-item "Preview auto-submit" / "Submit for real" flow
++  on the application detail page; feed-level "⚡ Auto-apply (Lever)"
++  button (single item, and a bulk version in the multi-select bar,
++  capped to match the backend); a feed-level coverage badge ("N of M
++  postings here are Lever-hosted") so coverage is visible rather than
++  something to infer; cover-letter "Generate draft" + editable textarea,
++  threaded into both the preview and real-submit calls.
++- Fixed a real gap during this work, not after: `GET /opportunity-feed`
++  originally had no way to show "already auto-submitted" after a page
++  reload (only an in-memory session flag). Enriched that route's own
++  response with `ats_provider`/`ats_submitted_at`, looked up
++  post-hoc — deliberately NOT added to the shared `buildOpportunityFeed()`
++  builder, since `today.ts` and `dailyQueue.ts` also call it and didn't
++  need this.
++
++**Bugs caught during this work (flagging per usual practice, not
++burying them):**
++- `!== null` vs. `!= null` in the feed-enrichment filter — the mock
++  fixture's `promoted_opportunity_id` was `undefined`, not `null`, and
++  `!== null` let it through, firing an unnecessary query on every feed
++  load. Caught by a test written for the enrichment itself, not by
++  inspection.
++- `APPLICATION_COLUMNS` never included the new `ats_*` columns —
++  meaning even a successful submission's response would have silently
++  omitted the very fields it just wrote. Fixed before it shipped to the
++  frontend, which is exactly why I write backend tests before wiring a
++  UI on top of an endpoint.
++- A `str_replace` mid-session dropped a live line (`const metaParts =
++  [item.company];`) from `opportunityFeed.ts`, breaking the build.
++  Caught immediately by the typecheck-before-done habit, not by review.
++
++### Validation loop — all steps actually run
++1. `npm test` (api) — **791/791 passed**
++2. `npx tsc --noEmit` — clean on all three configs (src/scripts/tests),
++   except one **pre-existing, unrelated** error in
++   `writeOpportunitySource.test.ts` (confirmed via `git stash` that it
++   predates this gate entirely — not introduced here, not fixed here,
++   correctly left alone)
++3. `npm test` (web) — **63/63 passed**
++4. `npm run build` (web) — clean
++5. `bash tests/run_rls_tests.sh` against a real local Postgres 16
++   (`apt-get install postgresql` in-session) — **ALL TESTS PASSED**,
++   including the new Test 13 for migration 0030's columns specifically
++
++### What's genuinely unverified
++None of this has touched Lever's live API — this environment's network
++egress can't reach `api.lever.co`. Everything is built and tested
++against documented Lever behavior and mocked HTTP responses. Before
++trusting this for a real application: `dry_run: true` first, inspect
++what it says it would send, then one real test submission against a
++posting you don't mind duplicating, and confirm the actual confirmation
++email arrives before relying on it further.
++
++### Deliberately not built
++- **Non-Lever ATS support.** Not fabricated on speculation — would need
++  either an actually-verified public submission API for another
++  platform (none confirmed yet) or browser automation (Playwright),
++  which is a fundamentally different, much larger undertaking with real
++  fragility and ToS risk. Flagged as its own future decision, not
++  something to scope-creep into this gate.
++- **Real AI-generated cover letters.** Needs an LLM API key and an
++  accepted ongoing cost — your call, not assumed.
++- **Screening-question answer bank.** Common questions (work
++  authorization, sponsorship, etc.) currently just fail the submission
++  cleanly rather than being guessed at.
++
++## Next up
++Candidates discussed, none started yet: a settings page for pre-filled
++screening-question answers; a batch-review queue (approve several
++pending dry-runs at once, a middle ground between per-click confirm and
++no confirm — the "no confirm" end is not something I'd build regardless
++of being asked, given zero live verification exists yet); actually
++running this against a real Lever posting.
++
+ ## 2026-09-05 — Independent audit + RLS suite fixes
+ 
+ This entry is newer than everything below it, which was the last
 diff --git a/api/src/lib/env.ts b/api/src/lib/env.ts
 index f4643a6..fd5533c 100644
 --- a/api/src/lib/env.ts
@@ -989,6 +1118,62 @@ index 0cd7705..db1ff4d 100644
  
  describe("ResumeCreateRequestSchema", () => {
    it("accepts a minimal valid record (label only)", () => {
+diff --git a/tests/rls/test_application_ownership.sql b/tests/rls/test_application_ownership.sql
+index b3afae9..eaca742 100644
+--- a/tests/rls/test_application_ownership.sql
++++ b/tests/rls/test_application_ownership.sql
+@@ -356,4 +356,51 @@ begin
+   raise notice 'PASS: deleting a resume clears application.resume_id (ON DELETE SET NULL) without deleting the application itself';
+ end $$;
+ 
++\echo '--- Test 13 (Gate R8 / migration 0030): the ats_* columns inherit application_update_own / application_select_own — no new policy was added for them, so this confirms that decision was correct rather than assuming it ---'
++do $$
++declare
++  v_uid_a uuid; v_uid_b uuid; v_app_a_id uuid; v_app_b_id uuid;
++  v_provider text; v_submitted_at timestamptz; v_rows_affected int; v_count int;
++begin
++  select val into v_uid_a from app_test_ids where key = 'user_a';
++  select val into v_uid_b from app_test_ids where key = 'user_b';
++  select val into v_app_a_id from app_test_ids where key = 'app_a1';
++  select val into v_app_b_id from app_test_ids where key = 'app_b1';
++
++  -- Candidate A can write their own row's ats_* columns — the same
++  -- application_update_own policy every other column on this table
++  -- already uses (0018_application.sql), not a new grant.
++  perform set_config('request.jwt.claims', json_build_object('sub', v_uid_a)::text, true);
++  set local role authenticated;
++  update public.application
++  set ats_provider = 'lever', ats_submitted_at = now(), ats_external_id = 'ext-123'
++  where id = v_app_a_id;
++  select ats_provider, ats_submitted_at into v_provider, v_submitted_at from public.application where id = v_app_a_id;
++  reset role;
++  if v_provider is distinct from 'lever' or v_submitted_at is null then
++    raise exception 'FAIL: candidate could not write their own application''s ats_* columns (provider=%, submitted_at=%)', v_provider, v_submitted_at;
++  end if;
++  raise notice 'PASS: candidate can write their own application''s ats_* columns';
++
++  -- Candidate B cannot read candidate A's ats_* columns at all (the row
++  -- is invisible to them, same as Test 8 already proves for the rest of
++  -- the row — repeated here so a future reader doesn't have to assume
++  -- the new columns behave the same without seeing it confirmed).
++  perform set_config('request.jwt.claims', json_build_object('sub', v_uid_b)::text, true);
++  set local role authenticated;
++  select count(*) into v_count from public.application where id = v_app_a_id and ats_provider = 'lever';
++  if v_count != 0 then
++    raise exception 'FAIL: user B could read user A''s ats_provider (count=%)', v_count;
++  end if;
++
++  -- Candidate B cannot flip candidate A's ats_* columns either.
++  update public.application set ats_provider = 'hacked' where id = v_app_a_id;
++  get diagnostics v_rows_affected = row_count;
++  reset role;
++  if v_rows_affected != 0 then
++    raise exception 'FAIL: user B updated user A''s ats_provider (rows_affected=%)', v_rows_affected;
++  end if;
++  raise notice 'PASS: another candidate can neither read nor write this candidate''s ats_* columns';
++end $$;
++
+ \echo '--- ALL APPLICATION TESTS PASSED ---'
 diff --git a/web/src/lib/api.ts b/web/src/lib/api.ts
 index edb4671..0f5001b 100644
 --- a/web/src/lib/api.ts
@@ -1334,7 +1519,7 @@ index 94e6a76..d21c408 100644
      const o = application.opportunity;
      if (!o) return h("div", {}, []);
 diff --git a/web/src/pages/opportunityFeed.ts b/web/src/pages/opportunityFeed.ts
-index b070c3b..79a331d 100644
+index b070c3b..9d5e1d8 100644
 --- a/web/src/pages/opportunityFeed.ts
 +++ b/web/src/pages/opportunityFeed.ts
 @@ -24,11 +24,15 @@ import {
@@ -1353,7 +1538,32 @@ index b070c3b..79a331d 100644
  
  function pill(text: string, cls: string): HTMLElement {
    return h("span", { class: `pill pill--${cls}` }, [text]);
-@@ -171,12 +175,69 @@ export async function renderOpportunityFeed(root: HTMLElement) {
+@@ -101,6 +105,24 @@ export async function renderOpportunityFeed(root: HTMLElement) {
+       ]),
+     );
+ 
++    // Gate R8 follow-up — directly answers "how much of my actual feed is
++    // even auto-apply eligible" rather than leaving that as a question
++    // the person has to answer by eyeballing individual cards. Counted
++    // over whatever `items` currently holds (respects the active resume
++    // tab, same as every other count on this page) — not a separate API
++    // call, since isLeverPostingUrl is a pure client-side check against
++    // data already fetched.
++    if (items.length > 0) {
++      const leverEligibleCount = items.filter((item) => isLeverPostingUrl(item.application_url)).length;
++      main.append(
++        h("div", { class: "subtle", style: "margin-bottom:12px" }, [
++          leverEligibleCount > 0
++            ? `⚡ ${leverEligibleCount} of ${items.length} postings here are Lever-hosted (auto-apply eligible).`
++            : `None of the ${items.length} postings here are Lever-hosted — auto-apply isn't available for this batch yet.`,
++        ]),
++      );
++    }
++
+     if (resumeGroups.length > 0) {
+       main.append(renderResumeTabs());
+     }
+@@ -171,12 +193,69 @@ export async function renderOpportunityFeed(root: HTMLElement) {
        }
      }
  
@@ -1423,7 +1633,7 @@ index b070c3b..79a331d 100644
          ]),
        ]),
      ]);
-@@ -232,6 +293,75 @@ export async function renderOpportunityFeed(root: HTMLElement) {
+@@ -232,6 +311,75 @@ export async function renderOpportunityFeed(root: HTMLElement) {
        }
      }
  
@@ -1499,7 +1709,7 @@ index b070c3b..79a331d 100644
      const metaParts = [item.company];
      if (item.location) metaParts.push(item.location);
      if (item.work_mode) metaParts.push(item.work_mode);
-@@ -253,6 +383,13 @@ export async function renderOpportunityFeed(root: HTMLElement) {
+@@ -253,6 +401,13 @@ export async function renderOpportunityFeed(root: HTMLElement) {
      }
  
      const alreadyApplied = item.promoted_opportunity_id !== null;
@@ -1513,7 +1723,7 @@ index b070c3b..79a331d 100644
  
      // Gate R7: bulk-select checkbox — omitted entirely once an item is
      // already applied (nothing left to select it for).
-@@ -305,6 +442,7 @@ export async function renderOpportunityFeed(root: HTMLElement) {
+@@ -305,6 +460,7 @@ export async function renderOpportunityFeed(root: HTMLElement) {
            h("button", { class: "btn btn--small btn--primary", onClick: apply, disabled: alreadyApplied }, [
              alreadyApplied ? "Application started" : "Start application",
            ]),

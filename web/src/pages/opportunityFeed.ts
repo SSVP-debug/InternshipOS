@@ -105,6 +105,24 @@ export async function renderOpportunityFeed(root: HTMLElement) {
       ]),
     );
 
+    // Gate R8 follow-up — directly answers "how much of my actual feed is
+    // even auto-apply eligible" rather than leaving that as a question
+    // the person has to answer by eyeballing individual cards. Counted
+    // over whatever `items` currently holds (respects the active resume
+    // tab, same as every other count on this page) — not a separate API
+    // call, since isLeverPostingUrl is a pure client-side check against
+    // data already fetched.
+    if (items.length > 0) {
+      const leverEligibleCount = items.filter((item) => isLeverPostingUrl(item.application_url)).length;
+      main.append(
+        h("div", { class: "subtle", style: "margin-bottom:12px" }, [
+          leverEligibleCount > 0
+            ? `⚡ ${leverEligibleCount} of ${items.length} postings here are Lever-hosted (auto-apply eligible).`
+            : `None of the ${items.length} postings here are Lever-hosted — auto-apply isn't available for this batch yet.`,
+        ]),
+      );
+    }
+
     if (resumeGroups.length > 0) {
       main.append(renderResumeTabs());
     }

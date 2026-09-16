@@ -356,4 +356,51 @@ begin
   raise notice 'PASS: deleting a resume clears application.resume_id (ON DELETE SET NULL) without deleting the application itself';
 end $$;
 
+\echo '--- Test 13 (Gate R8 / migration 0030): the ats_* columns inherit application_update_own / application_select_own — no new policy was added for them, so this confirms that decision was correct rather than assuming it ---'
+do $$
+declare
+  v_uid_a uuid; v_uid_b uuid; v_app_a_id uuid; v_app_b_id uuid;
+  v_provider text; v_submitted_at timestamptz; v_rows_affected int; v_count int;
+begin
+  select val into v_uid_a from app_test_ids where key = 'user_a';
+  select val into v_uid_b from app_test_ids where key = 'user_b';
+  select val into v_app_a_id from app_test_ids where key = 'app_a1';
+  select val into v_app_b_id from app_test_ids where key = 'app_b1';
+
+  -- Candidate A can write their own row's ats_* columns — the same
+  -- application_update_own policy every other column on this table
+  -- already uses (0018_application.sql), not a new grant.
+  perform set_config('request.jwt.claims', json_build_object('sub', v_uid_a)::text, true);
+  set local role authenticated;
+  update public.application
+  set ats_provider = 'lever', ats_submitted_at = now(), ats_external_id = 'ext-123'
+  where id = v_app_a_id;
+  select ats_provider, ats_submitted_at into v_provider, v_submitted_at from public.application where id = v_app_a_id;
+  reset role;
+  if v_provider is distinct from 'lever' or v_submitted_at is null then
+    raise exception 'FAIL: candidate could not write their own application''s ats_* columns (provider=%, submitted_at=%)', v_provider, v_submitted_at;
+  end if;
+  raise notice 'PASS: candidate can write their own application''s ats_* columns';
+
+  -- Candidate B cannot read candidate A's ats_* columns at all (the row
+  -- is invisible to them, same as Test 8 already proves for the rest of
+  -- the row — repeated here so a future reader doesn't have to assume
+  -- the new columns behave the same without seeing it confirmed).
+  perform set_config('request.jwt.claims', json_build_object('sub', v_uid_b)::text, true);
+  set local role authenticated;
+  select count(*) into v_count from public.application where id = v_app_a_id and ats_provider = 'lever';
+  if v_count != 0 then
+    raise exception 'FAIL: user B could read user A''s ats_provider (count=%)', v_count;
+  end if;
+
+  -- Candidate B cannot flip candidate A's ats_* columns either.
+  update public.application set ats_provider = 'hacked' where id = v_app_a_id;
+  get diagnostics v_rows_affected = row_count;
+  reset role;
+  if v_rows_affected != 0 then
+    raise exception 'FAIL: user B updated user A''s ats_provider (rows_affected=%)', v_rows_affected;
+  end if;
+  raise notice 'PASS: another candidate can neither read nor write this candidate''s ats_* columns';
+end $$;
+
 \echo '--- ALL APPLICATION TESTS PASSED ---'

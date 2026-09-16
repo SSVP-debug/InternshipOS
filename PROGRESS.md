@@ -1,5 +1,124 @@
 # InternshipOS — Progress
 
+## 2026-09-15 — Gate R8: real external ATS submission (Lever), bulk variant, cover-letter draft
+
+This entry is newer than everything below it. Verified by actually
+running the code — full test suites, all typecheck configs, both
+production builds, and (for the RLS change specifically) a real local
+Postgres 16 run of the entire migration chain + RLS suite, not just a
+read-through.
+
+**Why this gate exists:** reverses part of the prior Gate R0 decision
+that real form-submission/browser automation was out of scope — but
+narrowly, not wholesale. Full reasoning, scope boundaries, and
+explicitly-declined alternatives live in
+`docs/gate-r8-lever-ats-submission.md`; this entry is the handover
+summary, not a replacement for that doc.
+
+**What shipped:**
+- `POST /applications/:id/submit-to-ats` — submits one application for
+  real, through Lever's public postings-apply endpoint. Lever only:
+  Greenhouse and other major ATS platforms do not have an equivalent
+  public, candidate-usable submission API (checked, not assumed — an
+  earlier claim that Greenhouse did was wrong and corrected).
+- `POST /opportunity-matches/bulk-submit-to-ats` — bulk variant, capped
+  at 5 (vs. bulk-apply's 20 — these are real, irreversible external
+  actions, not internal tracking). Shares `attemptAtsSubmission.ts`
+  (new) with the single-item route rather than duplicating ~180 lines
+  of eligibility logic — refactored the original route down to a thin
+  wrapper around this shared function first, and confirmed the refactor
+  was behavior-preserving before building the bulk route on top of it.
+- `GET /applications/:id/cover-letter-draft` — a **templated**, not
+  AI-generated, draft (`coverLetterTemplate.ts`) built from data already
+  on file (name, resume label, matched skills, opportunity title/
+  company). This codebase has no LLM integration and none was added —
+  real AI generation is flagged as its own explicit decision, not
+  assumed.
+- Migration `0030_application_ats_submission.sql` —
+  `ats_provider`/`ats_external_id`/`ats_submitted_at`/
+  `ats_submission_error` on `application`. No new RLS policy (inherits
+  `application_update_own`/`application_select_own`) — added a dedicated
+  RLS test (Test 13, `test_application_ownership.sql`) confirming that
+  inheritance actually holds rather than leaving it asserted-but-untested.
+- Two independent safety layers on every submission path:
+  `EXTERNAL_ATS_SUBMISSION_ENABLED` (server-wide kill switch, default
+  off — deliberately NOT `z.coerce.boolean()`, which parses the literal
+  string `"false"` as `true`; caught and fixed before shipping) and
+  `dry_run` (per-request, defaults `true`).
+- Frontend: single-item "Preview auto-submit" / "Submit for real" flow
+  on the application detail page; feed-level "⚡ Auto-apply (Lever)"
+  button (single item, and a bulk version in the multi-select bar,
+  capped to match the backend); a feed-level coverage badge ("N of M
+  postings here are Lever-hosted") so coverage is visible rather than
+  something to infer; cover-letter "Generate draft" + editable textarea,
+  threaded into both the preview and real-submit calls.
+- Fixed a real gap during this work, not after: `GET /opportunity-feed`
+  originally had no way to show "already auto-submitted" after a page
+  reload (only an in-memory session flag). Enriched that route's own
+  response with `ats_provider`/`ats_submitted_at`, looked up
+  post-hoc — deliberately NOT added to the shared `buildOpportunityFeed()`
+  builder, since `today.ts` and `dailyQueue.ts` also call it and didn't
+  need this.
+
+**Bugs caught during this work (flagging per usual practice, not
+burying them):**
+- `!== null` vs. `!= null` in the feed-enrichment filter — the mock
+  fixture's `promoted_opportunity_id` was `undefined`, not `null`, and
+  `!== null` let it through, firing an unnecessary query on every feed
+  load. Caught by a test written for the enrichment itself, not by
+  inspection.
+- `APPLICATION_COLUMNS` never included the new `ats_*` columns —
+  meaning even a successful submission's response would have silently
+  omitted the very fields it just wrote. Fixed before it shipped to the
+  frontend, which is exactly why I write backend tests before wiring a
+  UI on top of an endpoint.
+- A `str_replace` mid-session dropped a live line (`const metaParts =
+  [item.company];`) from `opportunityFeed.ts`, breaking the build.
+  Caught immediately by the typecheck-before-done habit, not by review.
+
+### Validation loop — all steps actually run
+1. `npm test` (api) — **791/791 passed**
+2. `npx tsc --noEmit` — clean on all three configs (src/scripts/tests),
+   except one **pre-existing, unrelated** error in
+   `writeOpportunitySource.test.ts` (confirmed via `git stash` that it
+   predates this gate entirely — not introduced here, not fixed here,
+   correctly left alone)
+3. `npm test` (web) — **63/63 passed**
+4. `npm run build` (web) — clean
+5. `bash tests/run_rls_tests.sh` against a real local Postgres 16
+   (`apt-get install postgresql` in-session) — **ALL TESTS PASSED**,
+   including the new Test 13 for migration 0030's columns specifically
+
+### What's genuinely unverified
+None of this has touched Lever's live API — this environment's network
+egress can't reach `api.lever.co`. Everything is built and tested
+against documented Lever behavior and mocked HTTP responses. Before
+trusting this for a real application: `dry_run: true` first, inspect
+what it says it would send, then one real test submission against a
+posting you don't mind duplicating, and confirm the actual confirmation
+email arrives before relying on it further.
+
+### Deliberately not built
+- **Non-Lever ATS support.** Not fabricated on speculation — would need
+  either an actually-verified public submission API for another
+  platform (none confirmed yet) or browser automation (Playwright),
+  which is a fundamentally different, much larger undertaking with real
+  fragility and ToS risk. Flagged as its own future decision, not
+  something to scope-creep into this gate.
+- **Real AI-generated cover letters.** Needs an LLM API key and an
+  accepted ongoing cost — your call, not assumed.
+- **Screening-question answer bank.** Common questions (work
+  authorization, sponsorship, etc.) currently just fail the submission
+  cleanly rather than being guessed at.
+
+## Next up
+Candidates discussed, none started yet: a settings page for pre-filled
+screening-question answers; a batch-review queue (approve several
+pending dry-runs at once, a middle ground between per-click confirm and
+no confirm — the "no confirm" end is not something I'd build regardless
+of being asked, given zero live verification exists yet); actually
+running this against a real Lever posting.
+
 ## 2026-09-05 — Independent audit + RLS suite fixes
 
 This entry is newer than everything below it, which was the last
