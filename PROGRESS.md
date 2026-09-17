@@ -1,5 +1,68 @@
 # InternshipOS — Progress
 
+## 2026-09-17 — Feed coverage badge, screening-answer bank, batch-review queue
+
+This entry is newer than everything below it. Two of these three were
+genuinely new pieces (new table, new page section, new UI flow), not
+fixes — verified by actually running things, including standing up a
+real local Postgres 16 instance in-session specifically to run the RLS
+suite end to end rather than relying on typecheck/vitest alone.
+
+**Feed coverage badge:** `opportunityFeed.ts` now shows "N of M postings
+here are Lever-hosted (auto-apply eligible)" under the page header —
+directly answers "how much of my feed is even auto-apply eligible"
+without the person having to eyeball it. Pure client-side count over
+already-fetched data, no new API call.
+
+**Screening-answer bank (migration `0031_screening_answer.sql`):** a
+candidate-maintained reference library of Q&A pairs (relocation,
+expected rate, etc.), full CRUD route + Profile page tab, same
+ownership-through-candidate RLS pattern as `education`/
+`work_authorization`. **Deliberately NOT wired into
+`attemptAtsSubmission.ts` or anything auto-apply — this is stated
+explicitly in the migration's own header, the route's header, and the
+frontend section's own copy.** There's still no reliable way to
+discover a Lever posting's actual custom-question schema from its
+public read API, so there's nothing to safely auto-match against yet;
+wiring this into real auto-fill is a separate, later decision if that
+ever changes.
+
+**Batch-review queue:** replaced the bulk auto-apply flow's native
+`confirm()` dialog (a single opaque string listing every pending item)
+with a proper on-page review panel — per-item checkboxes (pre-checked,
+so "yes to all" is still one click), each item's full dry-run preview
+(posting, name, email, resume) instead of a title-only line, and a
+"Submit approved (N)" action. Same two backend safety layers as every
+other path (`EXTERNAL_ATS_SUBMISSION_ENABLED`, `dry_run`) — this only
+changed how the human-in-the-loop step looks, not whether one exists;
+final submission still shows its own `confirm()` naming the count.
+
+**A real bug caught by actually running the RLS suite, not by
+inspection:** `screening_answer` had correct RLS policies but no
+table-level `GRANT` in the local test shim, so every write failed with
+"permission denied for table screening_answer" — RLS alone isn't
+sufficient without the underlying grant. This is a gap specific to the
+local Postgres simulation (`tests/local_auth_shim_grants.sql`), not
+production — real Supabase grants new `public`-schema tables to
+`authenticated` automatically. Fixed by adding the table to that shim
+file, then re-ran the full 31-migration chain + every RLS suite to
+confirm nothing else was affected.
+
+### Validation loop — all steps actually run
+1. `npm test` (api) — **811/811 passed**
+2. `npx tsc --noEmit` — clean on all three configs, except the one
+   pre-existing unrelated error already noted in the entry below
+3. `npm test` (web) — **63/63 passed**
+4. `npm run build` (web) — clean
+5. `bash tests/run_rls_tests.sh` against real local Postgres 16 —
+   **ALL TESTS PASSED**, including 9 new tests in
+   `test_screening_answer_ownership.sql`
+
+### Not done this round
+Item on the original 5-item list not started: verifying additional ATS
+platforms beyond Lever (needs web search enabled — not fabricating a
+second unverified claim after the earlier Greenhouse correction).
+
 ## 2026-09-15 — Gate R8: real external ATS submission (Lever), bulk variant, cover-letter draft
 
 This entry is newer than everything below it. Verified by actually

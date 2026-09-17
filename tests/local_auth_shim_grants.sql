@@ -90,6 +90,15 @@ grant all on storage.objects, storage.buckets to service_role;
 -- restriction.
 grant select, insert, update, delete on public.resume, public.resume_skill to authenticated;
 
+-- Gate R8 follow-up: screening_answer grants (0031_screening_answer.sql).
+-- Same full CRUD grant pattern as resume/resume_skill above — RLS's
+-- ownership-through-candidate policies (screening_answer_select_own etc.)
+-- do the actual per-row restriction; this is only the table-level grant a
+-- real Supabase project would apply automatically to any new public-schema
+-- table, which this local shim has to do by hand per table since it's not
+-- running against real Supabase.
+grant select, insert, update, delete on public.screening_answer to authenticated;
+
 -- anon gets nothing in Phase 0/1/2 — no unauthenticated read/write surface yet.
 
 -- service_role bypasses RLS via the bypassrls role attribute (set in
@@ -98,5 +107,5 @@ grant select, insert, update, delete on public.resume, public.resume_skill to au
 -- endpoint's post-provisioning step, and the ingestion/matching scripts'
 -- writes to opportunity_source/opportunity_match), never exposed to a
 -- client.
-grant all on public.candidate, public.personal_info, public.consent_record, public.education, public.work_authorization, public.skill, public.project, public.experience, public.achievement, public.certification, public.evidence_source, public.claim, public.opportunity, public.application, public.application_status_event, public.application_note, public.opportunity_source, public.opportunity_match, public.resume, public.resume_skill
+grant all on public.candidate, public.personal_info, public.consent_record, public.education, public.work_authorization, public.skill, public.project, public.experience, public.achievement, public.certification, public.evidence_source, public.claim, public.opportunity, public.application, public.application_status_event, public.application_note, public.opportunity_source, public.opportunity_match, public.resume, public.resume_skill, public.screening_answer
   to service_role;

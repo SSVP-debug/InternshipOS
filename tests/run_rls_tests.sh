@@ -96,4 +96,7 @@ $PSQL_RUN -v ON_ERROR_STOP=1 -d "$DB_NAME" -f "$ROOT_DIR/tests/rls/test_opportun
 echo "== Running RLS/ownership test suite (Gate R1: resume, resume_skill) =="
 $PSQL_RUN -v ON_ERROR_STOP=1 -d "$DB_NAME" -f "$ROOT_DIR/tests/rls/test_resume_ownership.sql"
 
+echo "== Running RLS/ownership test suite (Gate R8 follow-up: screening_answer) =="
+$PSQL_RUN -v ON_ERROR_STOP=1 -d "$DB_NAME" -f "$ROOT_DIR/tests/rls/test_screening_answer_ownership.sql"
+
 echo "== ALL TESTS PASSED =="

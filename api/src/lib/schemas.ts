@@ -92,6 +92,15 @@ export const EducationRequestSchema = z
   );
 export type EducationRequest = z.infer<typeof EducationRequestSchema>;
 
+// Gate R8 follow-up — see 0031_screening_answer.sql's own header for the
+// scoping note: this is a reference library, never auto-matched against
+// a real posting's questions.
+export const ScreeningAnswerRequestSchema = z.object({
+  question: z.string().trim().min(1).max(500),
+  answer: z.string().trim().min(1).max(4000),
+});
+export type ScreeningAnswerRequest = z.infer<typeof ScreeningAnswerRequestSchema>;
+
 export const UuidParamSchema = z.string().uuid();
 
 // ── WorkAuthorization (Day 2) ───────────────────────────────────────────

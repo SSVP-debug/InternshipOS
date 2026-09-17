@@ -160,6 +160,19 @@ export interface Education {
 }
 export const educationApi = makeCrud<Education>("education", "education", "education");
 
+// Gate R8 follow-up — a candidate-maintained reference library, NOT
+// auto-matched against any real posting's questions. See
+// 0031_screening_answer.sql's own header for why (no reliable way to
+// discover a Lever posting's actual custom-question schema from its
+// public read API). This is purely somewhere to keep answers you'll
+// copy from by hand.
+export interface ScreeningAnswer {
+  id: string;
+  question: string;
+  answer: string;
+}
+export const screeningAnswerApi = makeCrud<ScreeningAnswer>("screening-answers", "screening_answers", "screening_answer");
+
 export interface Skill {
   id: string;
   name: string;

@@ -29,6 +29,7 @@ import {
   submitApplicationToAts,
   type OpportunityFeedItem,
   type ResumeFeedGroup,
+  type BulkSubmitToAtsResult,
 } from "../lib/api";
 import { feedBadgeCount } from "../lib/navBadges";
 import { navigate } from "../lib/router";
@@ -71,11 +72,23 @@ export async function renderOpportunityFeed(root: HTMLElement) {
   let activeResumeId: string | null = null;
   const selected = new Set<string>();
   let loadingResumeView = false;
+  // Gate R8 follow-up — batch-review queue state. When set, draw() shows
+  // a dedicated review panel (per-item checkboxes, pre-checked) instead
+  // of the normal feed list, replacing what used to be a single native
+  // confirm() dialog listing every item as one opaque string. Cleared on
+  // both "Submit approved" and "Cancel" — never left dangling across an
+  // unrelated draw() (e.g. a resume-tab switch mid-review would be
+  // confusing, so switchResume also clears it — see below).
+  let pendingReview: BulkSubmitToAtsResult[] | null = null;
+  let pendingReviewTruncatedCount = 0;
+  const approvedForReview = new Set<string>();
 
   async function switchResume(resumeId: string | null) {
     if (resumeId === activeResumeId || loadingResumeView) return;
     loadingResumeView = true;
     selected.clear();
+    pendingReview = null;
+    approvedForReview.clear();
     draw(); // show the tab switch + a loading state immediately
 
     try {
@@ -129,6 +142,15 @@ export async function renderOpportunityFeed(root: HTMLElement) {
 
     if (loadingResumeView) {
       main.append(h("div", { class: "page-loading" }, ["Loading…"]));
+      return;
+    }
+
+    // Gate R8 follow-up — while a batch review is pending, it replaces
+    // the normal list entirely rather than sitting above it: the point
+    // is focused review of exactly these items, not scrolling past the
+    // rest of the feed to find the checkboxes.
+    if (pendingReview !== null) {
+      main.append(renderReviewQueue());
       return;
     }
 
@@ -217,30 +239,10 @@ export async function renderOpportunityFeed(root: HTMLElement) {
           toast("None of the selected matches could be auto-submitted right now.", "error");
           return;
         }
-        const summaryLines = eligible.map((r) => `• ${r.would_submit?.posting_title ?? r.opportunity_match_id}`).join("\n");
-        const skipped = preview.results.length - eligible.length;
-        const confirmed = confirm(
-          `Submit ${eligible.length} application(s) to Lever now?\n\n${summaryLines}\n\n` +
-            (skipped > 0 ? `${skipped} other selected match(es) aren't eligible and will be skipped.\n\n` : "") +
-            (truncatedCount > 0 ? `${truncatedCount} more selected match(es) were left out of this batch (limit ${MAX_BULK_SUBMIT} at a time).\n\n` : "") +
-            "This sends real applications to these employers and can't be undone.",
-        );
-        if (!confirmed) return;
-
-        const { results, summary } = await bulkSubmitApplicationsToAts(eligible.map((r) => r.opportunity_match_id), { dry_run: false });
-        for (const result of results) {
-          if (result.status !== "submitted") continue;
-          const item = items.find((i) => i.opportunity_match_id === result.opportunity_match_id);
-          if (item) {
-            item.ats_provider = "lever";
-            item.ats_submitted_at = new Date().toISOString();
-          }
-        }
-        const parts = [`${summary.submitted} submitted`];
-        if (summary.failed > 0) parts.push(`${summary.failed} failed`);
-        if (summary.rejected > 0) parts.push(`${summary.rejected} rejected`);
-        toast(parts.join(", ") + ".", summary.failed > 0 || summary.rejected > 0 ? "error" : "success");
-        selected.clear();
+        pendingReview = preview.results;
+        pendingReviewTruncatedCount = truncatedCount;
+        approvedForReview.clear();
+        for (const r of eligible) approvedForReview.add(r.opportunity_match_id);
         draw();
       } catch (err) {
         toast(errorMessage(err), "error");
@@ -257,6 +259,119 @@ export async function renderOpportunityFeed(root: HTMLElement) {
             ? h("button", { class: "btn btn--small btn--primary", onClick: autoApplySelected }, [`⚡ Auto-apply ${autoApplyIds.length} (Lever)`])
             : null,
         ]),
+      ]),
+    ]);
+  }
+
+  // Gate R8 follow-up — the batch-review queue. Replaces what used to be
+  // a single native confirm() listing every pending item as one opaque
+  // string with per-item checkboxes (pre-checked, so the common "yes to
+  // all" case is still one click) and each item's full dry-run preview
+  // (posting title, name, email, resume) rather than a title-only line.
+  // Still gated by the same two backend safety layers as every other
+  // path here (EXTERNAL_ATS_SUBMISSION_ENABLED, dry_run) — this panel
+  // only changes how the human-in-the-loop step looks, not whether one
+  // exists; "Submit approved" still shows a final confirm() naming the
+  // count before anything real happens.
+  function renderReviewQueue(): HTMLElement {
+    const results = pendingReview ?? [];
+    const eligible = results.filter((r) => r.status === "dry_run");
+    const skippedCount = results.length - eligible.length;
+
+    function closeReview() {
+      pendingReview = null;
+      pendingReviewTruncatedCount = 0;
+      approvedForReview.clear();
+      draw();
+    }
+
+    const rows = eligible.map((r) => {
+      const id = r.opportunity_match_id;
+      const checked = approvedForReview.has(id);
+      const metaParts = [r.would_submit?.name, r.would_submit?.email, r.would_submit?.resume_title ? `Resume: ${r.would_submit.resume_title}` : null].filter(
+        (p): p is string => Boolean(p),
+      );
+      return h(
+        "label",
+        { class: "list-row", style: "display:flex; gap:10px; align-items:flex-start; cursor:pointer; padding:8px 0;" },
+        [
+          h("input", {
+            type: "checkbox",
+            ...(checked ? { checked: true } : {}),
+            onChange: (e: Event) => {
+              if ((e.target as HTMLInputElement).checked) approvedForReview.add(id);
+              else approvedForReview.delete(id);
+              draw();
+            },
+          }),
+          h("div", {}, [
+            h("div", {}, [r.would_submit?.posting_title ?? id]),
+            h("div", { class: "list-row__meta" }, [metaParts.join(" · ")]),
+          ]),
+        ],
+      );
+    });
+
+    const approvedCount = eligible.filter((r) => approvedForReview.has(r.opportunity_match_id)).length;
+
+    const submitBtn = h(
+      "button",
+      {
+        class: "btn btn--primary btn--small",
+        onClick: async () => {
+          const idsToSubmit = eligible.map((r) => r.opportunity_match_id).filter((id) => approvedForReview.has(id));
+          if (idsToSubmit.length === 0) {
+            toast("Nothing checked to submit.", "error");
+            return;
+          }
+          if (!confirm(`Submit ${idsToSubmit.length} application(s) to Lever now? This sends real applications to these employers and can't be undone.`)) {
+            return;
+          }
+          submitBtn.setAttribute("disabled", "");
+          try {
+            const { results: submitResults, summary } = await bulkSubmitApplicationsToAts(idsToSubmit, { dry_run: false });
+            for (const result of submitResults) {
+              if (result.status !== "submitted") continue;
+              const item = items.find((i) => i.opportunity_match_id === result.opportunity_match_id);
+              if (item) {
+                item.ats_provider = "lever";
+                item.ats_submitted_at = new Date().toISOString();
+              }
+            }
+            const parts = [`${summary.submitted} submitted`];
+            if (summary.failed > 0) parts.push(`${summary.failed} failed`);
+            if (summary.rejected > 0) parts.push(`${summary.rejected} rejected`);
+            toast(parts.join(", ") + ".", summary.failed > 0 || summary.rejected > 0 ? "error" : "success");
+            selected.clear();
+            closeReview();
+          } catch (err) {
+            toast(errorMessage(err), "error");
+            submitBtn.removeAttribute("disabled");
+          }
+        },
+      },
+      [`Submit approved (${approvedCount})`],
+    );
+
+    return h("div", { class: "card" }, [
+      h("h2", { class: "section-title", style: "margin-top:0" }, ["Review before submitting"]),
+      h("div", { class: "subtle", style: "margin-bottom:12px" }, [
+        `${eligible.length} application(s) ready to submit to Lever. Uncheck any you don't want to send.`,
+      ]),
+      ...rows,
+      skippedCount > 0
+        ? h("div", { class: "subtle", style: "margin-top:12px" }, [
+            `${skippedCount} other selected match(es) weren't eligible and were left out automatically.`,
+          ])
+        : null,
+      pendingReviewTruncatedCount > 0
+        ? h("div", { class: "subtle", style: "margin-top:4px" }, [
+            `${pendingReviewTruncatedCount} more selected match(es) were left out of this batch (limit 5 at a time).`,
+          ])
+        : null,
+      h("div", { class: "btn-row", style: "margin-top:14px" }, [
+        submitBtn,
+        h("button", { class: "btn btn--small", onClick: closeReview }, ["Cancel"]),
       ]),
     ]);
   }

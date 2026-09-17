@@ -22,6 +22,7 @@ import {
   achievementApi,
   certificationApi,
   evidenceSourceApi,
+  screeningAnswerApi,
   listClaims,
   createClaim,
   setClaimStatus,
@@ -36,6 +37,7 @@ import {
   type Certification,
   type EvidenceSource,
   type Claim,
+  type ScreeningAnswer,
 } from "../lib/api";
 
 const TABS = [
@@ -48,6 +50,7 @@ const TABS = [
   "Achievements",
   "Certifications",
   "Evidence Sources",
+  "Screening Answers",
 ] as const;
 type Tab = (typeof TABS)[number];
 
@@ -119,6 +122,8 @@ function renderTab(tab: Tab): HTMLElement {
       return renderCertificationsSection();
     case "Evidence Sources":
       return renderEvidenceSection();
+    case "Screening Answers":
+      return renderScreeningAnswersSection();
   }
 }
 
@@ -456,6 +461,30 @@ function renderEducationSection(): HTMLElement {
     api: educationApi,
     emptyLabel: "No education added yet.",
     renderExtra: (e) => renderClaimsWidget("education", e.id),
+  });
+}
+
+// ── Screening Answers (Gate R8 follow-up) ────────────────────────────────
+// A personal reference library — see screeningAnswerApi's own comment in
+// lib/api.ts and 0031_screening_answer.sql's header for why this is
+// deliberately NOT wired into auto-submit. Nothing added here is read by
+// submit-to-ats or any bulk variant; it's somewhere to keep answers you
+// copy from by hand until/unless a real way to discover a posting's
+// actual custom questions is confirmed.
+function renderScreeningAnswersSection(): HTMLElement {
+  const fields: FieldConfig<ScreeningAnswer>[] = [
+    { key: "question", label: "Question", type: "text", required: true, placeholder: "e.g. Are you willing to relocate?" },
+    { key: "answer", label: "Answer", type: "textarea", required: true, placeholder: "Your answer, ready to copy into an application form." },
+  ];
+  return renderCrudSection<ScreeningAnswer>({
+    title: "Screening Answers",
+    description:
+      "A personal reference library of answers to common application questions — nothing here is sent automatically. Copy from it manually when a form asks.",
+    fields,
+    titleOf: (a) => a.question,
+    subtitleOf: (a) => (a.answer.length > 80 ? `${a.answer.slice(0, 80)}…` : a.answer),
+    api: screeningAnswerApi,
+    emptyLabel: "No saved answers yet.",
   });
 }
 

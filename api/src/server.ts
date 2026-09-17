@@ -59,6 +59,7 @@ import { signupRouter } from "./routes/signup.js";
 import { profileRouter } from "./routes/profile.js";
 import { consentRouter } from "./routes/consent.js";
 import { educationRouter } from "./routes/education.js";
+import { screeningAnswerRouter } from "./routes/screening-answer.js";
 import { workAuthorizationRouter } from "./routes/work-authorization.js";
 import { skillRouter } from "./routes/skill.js";
 import { projectRouter } from "./routes/project.js";
@@ -150,6 +151,7 @@ export function createApp(env: Env): Express {
   app.use(requireAuth(env), profileRouter());
   app.use(requireAuth(env), consentRouter(env));
   app.use(requireAuth(env), educationRouter());
+  app.use(requireAuth(env), screeningAnswerRouter());
   app.use(requireAuth(env), workAuthorizationRouter());
   app.use(requireAuth(env), skillRouter());
   app.use(requireAuth(env), projectRouter());
