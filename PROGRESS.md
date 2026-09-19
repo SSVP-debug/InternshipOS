@@ -1,5 +1,64 @@
 # InternshipOS — Progress
 
+## 2026-09-19 — CORRECTION: Gate R8's Lever submission was built on a false premise
+
+This is a correction to the 2026-09-15 and 2026-09-17 entries below, not
+new work. **The real-submission path built in Gate R8 does not
+function.** Full details in `docs/gate-r8-lever-ats-submission.md`'s new
+correction notice at the top of that file; short version here.
+
+**What was wrong:** Gate R8 was built on the assumption that Lever's
+Postings API let a third party submit an application without any
+employer-issued credential, on the theory that Lever's own hosted apply
+page must post somewhere public. That assumption was never checked
+against Lever's actual documentation before `leverAdapter.ts` was
+written. Lever's own docs (`github.com/lever/postings-api`) state the
+submission endpoint plainly: `POST /v0/postings/SITE/POSTING-ID?key=APIKEY`
+— "you need an API key, which a Super Admin of your account can
+generate." That key belongs to the employer, not the candidate.
+`submitLeverApplication()` sends no key at all; every real submission
+attempt against an actual posting would fail authentication.
+
+**What was actually correct:** the read-only `GET /v0/postings/...`
+endpoint really is public and keyless — `getLeverPosting()` is fine.
+Only the submission call is broken.
+
+**Broader finding:** this correction came from actually checking six
+other platforms (Greenhouse — already known; Workable, SmartRecruiters,
+Breezy HR, Ashby, Recruitee — checked this round) against their own
+official documentation. All six require an employer-issued API key or
+OAuth token to submit programmatically. Zero platforms checked have a
+public, candidate-callable submission endpoint. The framing that
+justified building this gate at all — "Lever is the one exception" —
+does not hold, for any platform checked so far.
+
+**What this means for everything shipped in Gate R8:** the safety-rail
+design (kill switch, `dry_run` defaulting true, per-item batch-review
+queue) and the `GET`-side posting/eligibility logic are still sound
+patterns and still work as built. The one thing that doesn't work is
+the actual submission call — which was the entire point of the gate.
+Practically, `dry_run: true` still runs and returns a correct preview
+(it never calls the broken endpoint); `dry_run: false` will fail with
+an auth error every time, on any real posting.
+
+**Fixed in this pass:** corrected the misleading header comments in
+`leverAdapter.ts` and `attemptAtsSubmission.ts` (both previously
+asserted the submission endpoint was public — now marked broken, with
+the corrected understanding and a pointer to the full correction) and
+added the correction notice to the gate doc. Did not touch the actual
+code logic, tests, or the kill switch — this pass is documentation-only,
+correcting what the code claims about itself, not changing behavior
+that was already correctly gated behind `EXTERNAL_ATS_SUBMISSION_ENABLED`
+(still off by default) and `dry_run` (still true by default).
+
+**Not yet decided:** what to do with the feature going forward. Options
+on the table, not yet chosen: leave it as a documented non-functional
+placeholder; attempt real browser automation (a materially larger,
+riskier undertaking — see the gate doc's own reasoning on this); or
+pursue nothing further on real submission and keep only the tracking/
+matching/feed side of the product. This is a product decision, not an
+engineering one — deferred pending discussion.
+
 ## 2026-09-17 — Feed coverage badge, screening-answer bank, batch-review queue
 
 This entry is newer than everything below it. Two of these three were

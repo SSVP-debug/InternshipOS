@@ -1,28 +1,31 @@
 // leverAdapter.ts
 //
-// First (and currently only) real "submit to the employer" ATS
-// integration — Lever's public Postings API. This is the ONE mainstream
-// ATS with a submission endpoint that's genuinely public and usable
-// without an employer-issued API key: it's the same endpoint Lever's own
-// hosted "jobs.lever.co/{site}/{postingId}" apply page posts to under the
-// hood, so any candidate-facing client is allowed to call it directly.
+// ⚠️ CORRECTED 2026-09-19 — see docs/gate-r8-lever-ats-submission.md's
+// correction notice at the top for the full story. Short version: the
+// submitLeverApplication() function below sends a POST with no `key`
+// parameter, on the incorrect assumption that Lever's apply endpoint was
+// public like its read-only GET postings endpoint is. It is NOT. Lever's
+// own docs (github.com/lever/postings-api) state the POST endpoint
+// requires `?key=APIKEY`, an API key only the EMPLOYER's Lever Super
+// Admin can generate — not something a candidate-side tool can obtain
+// for an arbitrary company. Every real (non-dry-run) call this function
+// makes against an actual posting will fail authentication. This was
+// verified directly against Lever's own documentation, not assumed —
+// unlike the original version of this comment, which asserted the
+// opposite without checking.
 //
-// This is NOT true of Greenhouse, Workday, iCIMS, or most other ATS
-// platforms — they either have no public submission endpoint at all, or
-// require an employer-granted API credential the candidate doesn't have.
-// Extending auto-apply to those would need a fundamentally different
-// approach (per-employer API partnership, or browser automation against
-// their hosted form) — out of scope here. See
-// docs/gate-r8-lever-ats-submission.md for the full scope decision.
+// getLeverPosting() below is unaffected: the GET /v0/postings/... read
+// endpoint genuinely is public and keyless, confirmed both by Lever's
+// own docs and independently by multiple job-board-scraper tools that
+// rely on exactly that. Only the submission half of this file is wrong.
 //
-// IMPORTANT — confidence level: this adapter is built from documented,
-// publicly-known Lever Postings API behavior, but this environment's
-// network egress does not allow reaching api.lever.co, so none of this
-// has been exercised against Lever's live API. Before relying on it for
-// a real application, submit-to-ats.test.ts's mocked-fetch tests confirm
-// the *request shape* is correct against what's documented, but only a
-// real dry_run:false call against a live posting confirms Lever still
-// accepts it. Start with dry_run (the default — see application.ts).
+// Broader finding from the same verification pass: Greenhouse, Workable,
+// SmartRecruiters, Breezy HR, Ashby, and Recruitee were also checked.
+// All six require an employer-issued API key or OAuth token to submit an
+// application programmatically — same category as Lever's real
+// behavior. No mainstream ATS checked has a public, candidate-callable
+// submission endpoint. This file's original framing — "Lever is the one
+// exception" — does not hold.
 //
 // Deliberately narrow scope, matching this codebase's "don't guess"
 // posture elsewhere (adzunaAdapter.ts's conservative skill extraction,
@@ -107,12 +110,17 @@ export type LeverSubmitResult =
   | { ok: true; status: number }
   | { ok: false; status: number; message: string };
 
-/** Submits an application through Lever's public posting-apply endpoint
- * — the same one their own hosted apply page uses. `send_confirmation`
- * is left on the default (Lever emails the candidate a confirmation),
- * matching what a human applying manually would experience — nothing
- * about this should look, to the employer's ATS, any different from a
- * real person submitting through the hosted page. */
+/** ⚠️ BROKEN as written — see this file's header comment (2026-09-19
+ * correction). This POSTs to Lever's apply endpoint with no `key`
+ * parameter. Lever's own docs require `?key=APIKEY`, an employer-issued
+ * credential this function has no way to supply. Every call against a
+ * real posting will be rejected by Lever's authentication, not silently
+ * accepted. Left in place (rather than deleted) because the request
+ * *shape* below — field names, multipart resume handling — is still
+ * accurate to Lever's documented POST API and would be the right
+ * starting point if this were ever revisited with an actual API key
+ * obtained some other way (which is not a realistic path for a
+ * candidate-side tool against an arbitrary employer's account). */
 export async function submitLeverApplication(
   ref: LeverPostingRef,
   input: LeverApplicationInput,

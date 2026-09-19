@@ -1,5 +1,53 @@
 # Gate R8 — External ATS Submission (Lever only)
 
+> ## ⚠️ CORRECTION (2026-09-19) — the submission path described below does not work
+>
+> Everything in this document was written on a false premise. I assumed
+> Lever's public Postings API let a third party submit an application
+> without any employer-issued credential — the same public/keyless
+> access its **read** endpoint (`GET /v0/postings/...`) genuinely has.
+> That assumption was never checked against Lever's own documentation
+> before `leverAdapter.ts` was built on top of it.
+>
+> Lever's own canonical docs (`github.com/lever/postings-api`) state the
+> submission endpoint plainly:
+>
+> > `POST /v0/postings/SITE/POSTING-ID?key=APIKEY`
+> >
+> > To use the POST API, **you need an API key, which a Super Admin of
+> > your account can generate** from your integrations settings page.
+>
+> That key belongs to the *employer's* Lever account. A candidate-side
+> tool like InternshipOS has no way to obtain one for an arbitrary
+> company — the same reason Greenhouse doesn't work (see the "Why Lever,
+> and only Lever" section below, which is itself now half-wrong: Lever
+> is not the exception it was claimed to be).
+>
+> **Practical effect:** `submitLeverApplication()` sends a plain `POST`
+> with no `key` parameter. Against a real posting, every non-dry-run
+> submission this feature attempts would fail with an authentication
+> error. The `GET` posting-fetch calls (`getLeverPosting()`) are fine —
+> that part of the public API is real. The submission part is not.
+>
+> **Broader finding, not just Lever:** the same session that caught this
+> also checked Greenhouse, Workable, SmartRecruiters, Breezy HR, Ashby,
+> and Recruitee. All seven platforms checked — Lever included — require
+> an employer-issued API key or OAuth token to submit an application
+> programmatically. None has a public, candidate-callable submission
+> endpoint. The premise that justified this entire gate — "Lever is
+> different from the others" — does not hold. Real automated submission
+> to any of these platforms requires either credentials a candidate
+> cannot obtain, or browser automation mimicking a human filling the
+> hosted form (the harder, previously-deferred path).
+>
+> Everything below this notice describes the feature as it was designed
+> and built, kept for the historical record and because the `GET`
+> posting-fetch logic and the safety-rail design (kill switch, dry-run,
+> per-item review) are still sound patterns even though the submission
+> call itself doesn't work. Treat any claim below that Lever's
+> submission endpoint is "public" or "no-auth" as superseded by this
+> notice.
+
 **Status:** Implemented, including a bulk variant and a template-based
 cover-letter draft. Migration `0030_application_ats_submission.sql`,
 `api/src/lib/ats/leverAdapter.ts`, `api/src/lib/ats/attemptAtsSubmission.ts`

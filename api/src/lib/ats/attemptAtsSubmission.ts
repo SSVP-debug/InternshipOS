@@ -1,5 +1,13 @@
 // attemptAtsSubmission.ts
 //
+// ⚠️ The submission call this makes (via leverAdapter.ts's
+// submitLeverApplication) does not actually work against a real Lever
+// posting — it requires an employer-issued API key this code never
+// supplies. See leverAdapter.ts's header and
+// docs/gate-r8-lever-ats-submission.md's 2026-09-19 correction notice
+// for the full story before assuming anything below this comment
+// results in a real submission.
+//
 // The actual work behind POST /applications/:id/submit-to-ats, pulled out
 // of that route so the new bulk route (POST
 // /opportunity-matches/bulk-submit-to-ats) can call the exact same code
