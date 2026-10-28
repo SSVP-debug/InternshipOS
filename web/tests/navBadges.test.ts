@@ -40,6 +40,8 @@ function feedItem(id: string, overrides: Partial<OpportunityFeedItem> = {}): Opp
     duplicate_source_count: 0,
     deadline_date: null,
     ...overrides,
+    ats_provider: overrides.ats_provider ?? null,
+    ats_submitted_at: overrides.ats_submitted_at ?? null,
   };
 }
 

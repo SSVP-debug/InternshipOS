@@ -9,9 +9,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [master]
   pull_request:
-    branches: [main]
+    branches: [master]
   workflow_dispatch: {}
 
 # Least-privilege: none of these jobs push to the repo, open a PR, or
