@@ -14,7 +14,7 @@ import { loadEnv } from "../src/lib/env.js";
 
 const baseEnv = {
   SUPABASE_URL: "https://example.supabase.co",
-  SUPABASE_ANON_KEY: "anon-key",
+  SUPABASE_ANON_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImV4YW1wbGUiLCJyb2xlIjoiYW5vbiIsImlhdCI6MTY5MDAwMDAwMCwiZXhwIjoyMDA1NTc2MDAwfQ.signature",
   SUPABASE_SERVICE_ROLE_KEY: "service-role-key",
 } as NodeJS.ProcessEnv;
 
