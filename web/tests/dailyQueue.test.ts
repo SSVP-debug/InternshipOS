@@ -42,6 +42,8 @@ function matchQueueItem(id: string, overrides: Partial<OpportunityFeedItem> = {}
       promoted_opportunity_id: null,
       duplicate_source_count: 0,
       deadline_date: null,
+      ats_provider: null,
+      ats_submitted_at: null,
       ...overrides,
     },
   };
