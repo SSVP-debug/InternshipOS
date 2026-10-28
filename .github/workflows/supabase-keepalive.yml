@@ -1,53 +1,73 @@
 name: Supabase Keepalive
 
-# Supabase's free tier pauses a project after 7 days with no database
-# activity. This runs a trivial read-only query every 3 days (well under
-# the 7-day window, with margin for a missed/delayed run) against the
-# PRODUCTION Supabase project to keep it active. $0 cost — GitHub
-# Actions scheduled workflows are free, and this job runs in seconds.
+# Supabase Free projects may pause after a week without database activity.
+# Run a tiny read-only query every 3 days. The query hits an actual table,
+# unlike PostgREST's root/OpenAPI endpoint, and discards the response body.
 #
-# Setup required (one-time, in the GitHub repo, not in code):
-#   Settings -> Secrets and variables -> Actions -> New repository secret
-#     SUPABASE_URL       = https://<your-prod-project-ref>.supabase.co
-#     SUPABASE_ANON_KEY   = <anon/public key from Supabase project settings>
+# Required repository secrets:
+#   SUPABASE_URL              = https://<your-project-ref>.supabase.co
+#   SUPABASE_SERVICE_ROLE_KEY = service_role key from Supabase project settings
 #
-# This intentionally uses the anon key against a public, unauthenticated
-# REST endpoint (PostgREST's root) rather than any table read — it does
-# not need RLS-bypassing privileges, and it never touches candidate data.
+# The service-role key is only used by this trusted GitHub Actions job. It
+# is never echoed, included in an artifact, or sent to the browser.
 
 on:
   schedule:
     - cron: "0 6 */3 * *" # every 3 days at 06:00 UTC
-  workflow_dispatch: {} # allow manual trigger for testing
+  workflow_dispatch: {}
 
-# Least-privilege: this job only ever makes an outbound curl call — it
-# never touches the repo itself, so it doesn't need repo write access.
 permissions:
   contents: read
 
 jobs:
   ping-supabase:
-    name: Ping production Supabase project
+    name: Query production Supabase safely
     runs-on: ubuntu-latest
+    timeout-minutes: 3
     steps:
-      - name: Hit PostgREST root endpoint
+      - name: Validate secrets and check DNS
+        env:
+          SUPABASE_URL: \${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: \${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
-          if [ -z "${{ secrets.SUPABASE_URL }}" ] || [ -z "${{ secrets.SUPABASE_ANON_KEY }}" ]; then
-            echo "::error::SUPABASE_URL or SUPABASE_ANON_KEY repo secret is not set. See workflow header comment for setup steps."
+          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_SERVICE_ROLE_KEY" ]; then
+            echo "::error::Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY repository secret."
             exit 1
           fi
 
-          status=$(curl -s -o /dev/null -w "%{http_code}" \
-            "${{ secrets.SUPABASE_URL }}/rest/v1/" \
-            -H "apikey: ${{ secrets.SUPABASE_ANON_KEY }}")
+          host=$(node -e 'try { const u = new URL(process.env.SUPABASE_URL); if (u.protocol !== "https:") process.exit(2); console.log(u.hostname); } catch { process.exit(2); }') || {
+            echo "::error::SUPABASE_URL must be a valid HTTPS project URL such as https://project-ref.supabase.co."
+            exit 1
+          }
 
-          echo "PostgREST root responded with HTTP $status"
-
-          # PostgREST root returns 200 (OpenAPI spec) when reachable.
-          # Any 2xx/4xx response means the project is awake and responding;
-          # only a connection failure (curl exit code, empty status) or 5xx
-          # indicates a real problem.
-          if [ -z "$status" ] || [ "$status" -ge 500 ]; then
-            echo "::error::Supabase project did not respond as expected (HTTP $status)."
+          echo "Checking DNS for Supabase host: $host"
+          if ! getent ahosts "$host" >/dev/null; then
+            echo "::error::DNS could not resolve '$host'. Check the SUPABASE_URL secret for a typo and verify the project URL/status in the Supabase dashboard."
             exit 1
           fi
+          echo "DNS resolution succeeded."
+
+      - name: Query a minimal row to keep the database active
+        env:
+          SUPABASE_URL: \${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: \${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          base_url="\${SUPABASE_URL%/}"
+          if status=$(curl --silent --show-error --output /dev/null --write-out "%{http_code}" \
+            --connect-timeout 10 --max-time 25 --retry 2 --retry-delay 2 --retry-all-errors \
+            "$base_url/rest/v1/opportunity_source?select=id&limit=1" \
+            -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
+            -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY"); then
+            echo "Supabase table query responded with HTTP $status."
+          else
+            curl_exit=$?
+            echo "::error::Supabase request failed after retries (curl exit $curl_exit). Check the project URL, project availability, and outbound connectivity."
+            exit 1
+          fi
+
+          if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
+            echo "::error::Supabase table query returned HTTP $status. Check that the project is active, the service-role key is current, and the opportunity_source table/migrations exist."
+            exit 1
+          fi
+
+          echo "Supabase database query succeeded."
