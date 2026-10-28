@@ -117,19 +117,19 @@ export function formatTelegramDigest(
     const eligibility =
       item.eligibilityStatus === "eligible" ? "Eligible" : "Eligibility unknown — verify before applying";
     const lines = [
-      \`\${index + 1}. \${cleanLine(item.title)} — \${cleanLine(item.company, 80)}\`,
-      \`Match: \${Math.round(item.matchScore)}/100 | \${eligibility}\`,
-      \`Location: \${cleanLine(item.location, 80)}\`,
-      \`Type: \${cleanLine(item.employmentType, 40)}\`,
+      `${index + 1}. ${cleanLine(item.title)} — ${cleanLine(item.company, 80)}`,
+      `Match: ${Math.round(item.matchScore)}/100 | ${eligibility}`,
+      `Location: ${cleanLine(item.location, 80)}`,
+      `Type: ${cleanLine(item.employmentType, 40)}`,
     ];
-    if (item.deadlineDate) lines.push(\`Deadline: \${cleanLine(item.deadlineDate, 30)}\`);
-    lines.push(\`Apply: \${item.applicationUrl}\`);
-    return lines.join("\\n");
+    if (item.deadlineDate) lines.push(`Deadline: ${cleanLine(item.deadlineDate, 30)}`);
+    lines.push(`Apply: ${item.applicationUrl}`);
+    return lines.join("\n");
   });
 
-  let message = \`InternshipOS — \${items.length} new match\${items.length === 1 ? "" : "es"}\\n\\n\${sections.join("\\n\\n")}\`;
+  let message = `InternshipOS — ${items.length} new match${items.length === 1 ? "" : "es"}\n\n${sections.join("\n\n")}`;
   if (omittedCount > 0) {
-    message += \`\\n\\n+\${omittedCount} more match(es) not included. Review InternshipOS for the rest.\`;
+    message += `\n\n+${omittedCount} more match(es) not included. Review InternshipOS for the rest.`;
   }
   // Telegram's message limit is 4096 characters. Keep a margin for API-side
   // differences and avoid silently slicing a URL in the middle.
