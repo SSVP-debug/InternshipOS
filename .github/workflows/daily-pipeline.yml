@@ -155,3 +155,18 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: npm run match:all
+
+      # Personal MVP notifier: sends only for TELEGRAM_CANDIDATE_ID, never
+      # all candidates to one shared chat. If all Telegram secrets are absent
+      # the script skips cleanly; partial configuration fails visibly.
+      - name: Notify new matches on Telegram
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_CANDIDATE_ID: ${{ secrets.TELEGRAM_CANDIDATE_ID }}
+          TELEGRAM_MIN_MATCH_SCORE: ${{ vars.TELEGRAM_MIN_MATCH_SCORE }}
+          TELEGRAM_LOOKBACK_HOURS: ${{ vars.TELEGRAM_LOOKBACK_HOURS }}
+          TELEGRAM_MAX_MATCHES: ${{ vars.TELEGRAM_MAX_MATCHES }}
+        run: npm run notify:telegram
