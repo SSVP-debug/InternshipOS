@@ -14,7 +14,8 @@
     "smoke:prod": "tsx scripts/smoke-prod.ts",
     "ingest": "tsx scripts/ingest.ts",
     "match": "tsx scripts/run-matching.ts",
-    "match:all": "tsx scripts/match-all.ts"
+    "match:all": "tsx scripts/match-all.ts",
+    "notify:telegram": "tsx scripts/notify-telegram.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.117.3",
