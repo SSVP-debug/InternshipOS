@@ -62,14 +62,14 @@ function readNumberEnv(name: string, fallback: number, min: number, max: number)
   if (!raw) return fallback;
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed < min || parsed > max) {
-    throw new Error(\`\${name} must be a number between \${min} and \${max}.\`);
+    throw new Error(`${name} must be a number between ${min} and ${max}.`);
   }
   return parsed;
 }
 
 async function sendTelegramMessage(text: string): Promise<void> {
   // Do not log the request URL: Telegram's bot token is part of that URL.
-  const response = await fetch(\`https://api.telegram.org/bot\${botToken}/sendMessage\`, {
+  const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -90,7 +90,7 @@ async function sendTelegramMessage(text: string): Promise<void> {
   if (!response.ok || payload?.ok !== true) {
     // Deliberately omit Telegram's response body and request URL; neither is
     // needed for diagnostics, and the request URL contains the bot token.
-    throw new Error(\`Telegram sendMessage failed (HTTP \${response.status}). Check bot token, chat ID, and that the user has started the bot.\`);
+    throw new Error(`Telegram sendMessage failed (HTTP ${response.status}). Check bot token, chat ID, and that the user has started the bot.`);
   }
 }
 
@@ -114,7 +114,7 @@ async function main(): Promise<void> {
     .neq("eligibility_status", "ineligible")
     .order("match_score", { ascending: false });
 
-  if (matchError) throw new Error(\`Could not load recent candidate matches: \${matchError.message}\`);
+  if (matchError) throw new Error(`Could not load recent candidate matches: ${matchError.message}`);
 
   const matches = (matchRows ?? []).map((row) => ({
     ...row,
@@ -133,7 +133,7 @@ async function main(): Promise<void> {
     .in("id", sourceIds)
     .eq("status", "active");
 
-  if (sourceError) throw new Error(\`Could not load active internship listings: \${sourceError.message}\`);
+  if (sourceError) throw new Error(`Could not load active internship listings: ${sourceError.message}`);
 
   const { data: deliveryRows, error: deliveryError } = await supabase
     .from("telegram_notification_delivery")
@@ -141,7 +141,7 @@ async function main(): Promise<void> {
     .eq("candidate_id", candidateId)
     .in("opportunity_source_id", sourceIds);
 
-  if (deliveryError) throw new Error(\`Could not load Telegram delivery history: \${deliveryError.message}\`);
+  if (deliveryError) throw new Error(`Could not load Telegram delivery history: ${deliveryError.message}`);
 
   const deliveredIds = new Set((deliveryRows ?? []).map((row) => row.opportunity_source_id as string));
   const selection = selectTelegramNotificationItems(
@@ -175,11 +175,11 @@ async function main(): Promise<void> {
 
   if (insertError) {
     throw new Error(
-      \`Telegram accepted the digest, but delivery history could not be saved: \${insertError.message}. A retry may resend these postings.\`
+      `Telegram accepted the digest, but delivery history could not be saved: ${insertError.message}. A retry may resend these postings.`
     );
   }
 
-  console.log(\`Telegram digest sent: \${selection.items.length} posting(s); \${selection.omittedCount} additional match(es) omitted by the per-run cap.\`);
+  console.log(`Telegram digest sent: ${selection.items.length} posting(s); ${selection.omittedCount} additional match(es) omitted by the per-run cap.`);
 }
 
 main().catch((error) => {
