@@ -135,8 +135,8 @@ jobs:
 
       - name: Verify Supabase DNS and database connectivity
         env:
-          SUPABASE_URL: \${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: \${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
           host=$(node -e 'try { const u = new URL(process.env.SUPABASE_URL); if (u.protocol !== "https:") process.exit(2); console.log(u.hostname); } catch { process.exit(2); }') || {
             echo "::error::SUPABASE_URL must be a valid HTTPS project URL."
@@ -149,7 +149,7 @@ jobs:
             exit 1
           fi
 
-          base_url="\${SUPABASE_URL%/}"
+          base_url="${SUPABASE_URL%/}"
           if status=$(curl --silent --show-error --output /dev/null --write-out "%{http_code}" \
             --connect-timeout 10 --max-time 25 --retry 2 --retry-delay 2 --retry-all-errors \
             "$base_url/rest/v1/opportunity_source?select=id&limit=1" \
