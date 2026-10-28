@@ -7,9 +7,10 @@ name: Daily Opportunity Pipeline
 #
 # Same free-tier posture as the rest of this repo's CI (see ci.yml,
 # supabase-keepalive.yml): GitHub Actions scheduled workflows cost
-# nothing on the plans this project runs on, and this job only ever
-# talks to Adzuna's API, RemoteOK's public feed, and this project's own
-# Supabase project — no other external services.
+# nothing on the plans this project runs on. Ingestion/matching use
+# Adzuna, RemoteOK, and this project's Supabase project. The final
+# Telegram notification step is optional and runs only when its secrets
+# are configured; it is scoped to one candidate/chat, not all candidates.
 #
 # Setup required (one-time, in the GitHub repo, not in code):
 #   Settings -> Secrets and variables -> Actions -> New repository secret
@@ -17,6 +18,13 @@ name: Daily Opportunity Pipeline
 #     SUPABASE_SERVICE_ROLE_KEY = <service_role key from Supabase project settings>
 #     ADZUNA_APP_ID             = <from https://developer.adzuna.com/, optional>
 #     ADZUNA_APP_KEY            = <from https://developer.adzuna.com/, optional>
+#     TELEGRAM_BOT_TOKEN        = <optional; Telegram BotFather token>
+#     TELEGRAM_CHAT_ID          = <optional; one private chat>
+#     TELEGRAM_CANDIDATE_ID     = <optional; public.candidate.id UUID>
+#   Optional repository variables (Settings -> Secrets and variables -> Actions -> Variables):
+#     TELEGRAM_MIN_MATCH_SCORE  = 60 by default
+#     TELEGRAM_LOOKBACK_HOURS   = 36 by default
+#     TELEGRAM_MAX_MATCHES      = 5 by default
 #
 # ADZUNA_APP_ID / ADZUNA_APP_KEY are optional at the workflow level, same
 # as they are for a manual `npm run ingest` run: if unset, ingest.ts logs
