@@ -109,3 +109,9 @@ grant select, insert, update, delete on public.screening_answer to authenticated
 -- client.
 grant all on public.candidate, public.personal_info, public.consent_record, public.education, public.work_authorization, public.skill, public.project, public.experience, public.achievement, public.certification, public.evidence_source, public.claim, public.opportunity, public.application, public.application_status_event, public.application_note, public.opportunity_source, public.opportunity_match, public.resume, public.resume_skill, public.screening_answer
   to service_role;
+
+
+-- Telegram notification delivery ledger (0032): operator-only; never grant
+-- this table to anon/authenticated. The migration grants service_role on
+-- production; repeat here to make the local harness's intent explicit.
+grant all on public.telegram_notification_delivery to service_role;
