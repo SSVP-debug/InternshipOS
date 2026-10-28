@@ -32,7 +32,7 @@ export type TelegramNotificationItem = {
 };
 
 function isHttpUrl(value: string | null): value is string {
-  if (!value) return false;
+  if (!value || value.length > 1000) return false;
   try {
     const parsed = new URL(value);
     return parsed.protocol === "https:" || parsed.protocol === "http:";
