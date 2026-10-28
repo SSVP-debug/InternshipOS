@@ -9,6 +9,13 @@
 
 import { describe, it, expect, vi, afterEach } from "vitest";
 import request from "supertest";
+
+// These tests exercise Express routing only. Avoid constructing a real
+// Supabase client with dummy credentials when an arbitrary bearer token is present.
+vi.mock("../src/lib/supabaseClient.js", () => ({
+  adminClient: vi.fn(() => ({})),
+  userScopedClient: vi.fn(() => ({})),
+}));
 import { createApp } from "../src/server.js";
 import { loadEnv } from "../src/lib/env.js";
 
