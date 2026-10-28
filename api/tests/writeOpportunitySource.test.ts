@@ -20,6 +20,18 @@ function listing(overrides: Partial<CanonicalListing> = {}): CanonicalListing {
     deadline_date: null,
     posted_date: "2026-08-10",
     ...overrides,
+    sponsorship_offered: overrides.sponsorship_offered ?? null,
+    citizenship_requirement: overrides.citizenship_requirement ?? null,
+    jurisdiction_country: overrides.jurisdiction_country ?? null,
+    eligible_candidate_countries: overrides.eligible_candidate_countries ?? null,
+    citizenship_required_countries: overrides.citizenship_required_countries ?? null,
+    requires_existing_work_authorization: overrides.requires_existing_work_authorization ?? null,
+    required_degree_types: overrides.required_degree_types ?? null,
+    required_majors: overrides.required_majors ?? null,
+    required_major_match_mode: overrides.required_major_match_mode ?? null,
+    graduation_not_before: overrides.graduation_not_before ?? null,
+    graduation_not_after: overrides.graduation_not_after ?? null,
+    required_enrollment_statuses: overrides.required_enrollment_statuses ?? null,
   };
 }
 
