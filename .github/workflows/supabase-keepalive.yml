@@ -27,8 +27,8 @@ jobs:
     steps:
       - name: Validate secrets and check DNS
         env:
-          SUPABASE_URL: \${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: \${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
           if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_SERVICE_ROLE_KEY" ]; then
             echo "::error::Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY repository secret."
@@ -49,10 +49,10 @@ jobs:
 
       - name: Query a minimal row to keep the database active
         env:
-          SUPABASE_URL: \${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: \${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
-          base_url="\${SUPABASE_URL%/}"
+          base_url="${SUPABASE_URL%/}"
           if status=$(curl --silent --show-error --output /dev/null --write-out "%{http_code}" \
             --connect-timeout 10 --max-time 25 --retry 2 --retry-delay 2 --retry-all-errors \
             "$base_url/rest/v1/opportunity_source?select=id&limit=1" \
