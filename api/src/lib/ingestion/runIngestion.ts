@@ -28,12 +28,39 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { createAdzunaAdapter } from "./adapters/adzunaAdapter.js";
 import { createRemoteOkAdapter } from "./adapters/remoteokAdapter.js";
+import { createRemotiveAdapter } from "./adapters/remotiveAdapter.js";
+import { createGreenhouseAdapter } from "./adapters/greenhouseAdapter.js";
+import { createLeverPostingsAdapter } from "./adapters/leverPostingsAdapter.js";
+import { createAshbyAdapter } from "./adapters/ashbyAdapter.js";
 import { writeOpportunitySource } from "./writeOpportunitySource.js";
 import { expireStaleOpportunities } from "./expireStaleOpportunities.js";
 import type { IngestionSummary, SourceAdapter, SweepSummary } from "./types.js";
 
-function defaultAdapters(): SourceAdapter[] {
-  return [createAdzunaAdapter(), createRemoteOkAdapter()];
+export function defaultAdapters(): SourceAdapter[] {
+  return [
+    createAdzunaAdapter(),
+    createRemoteOkAdapter(),
+    createRemotiveAdapter(),
+    createGreenhouseAdapter(),
+    createLeverPostingsAdapter(),
+    createAshbyAdapter(),
+  ];
+}
+
+type AdapterOutcome =
+  | { ok: true; result: Awaited<ReturnType<SourceAdapter["run"]>> }
+  | { ok: false; sourceName: string; message: string };
+
+/**
+ * Runs one adapter, converting a rejection into a failed outcome (see the
+ * DEFENSIVE NOTE in the module header). Never rejects.
+ */
+async function runAdapterSafely(adapter: SourceAdapter): Promise<AdapterOutcome> {
+  try {
+    return { ok: true, result: await adapter.run() };
+  } catch (error) {
+    return { ok: false, sourceName: adapter.sourceName, message: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 export async function runIngestion(
@@ -43,26 +70,32 @@ export async function runIngestion(
   const startedAt = new Date().toISOString();
   const sources: IngestionSummary["sources"] = [];
 
-  for (const adapter of adapters) {
-    let runResult: Awaited<ReturnType<SourceAdapter["run"]>>;
-    try {
-      runResult = await adapter.run();
-    } catch (error) {
-      // adapter.run() rejected instead of resolving with errors populated
-      // (see the DEFENSIVE NOTE above) — report it as a fully failed
-      // source, same shape as any other adapter error, and continue with
-      // the remaining adapters rather than aborting the whole run.
+  // FETCH PHASE: every adapter's network work is independent (different
+  // hosts, no shared state), so all adapters run concurrently — total
+  // fetch time is the slowest source instead of the sum of all sources.
+  // runAdapterSafely never rejects, so one failing source cannot affect
+  // another. WRITE PHASE (below) stays sequential, in adapter order, so
+  // Supabase sees one writer at a time and the summary order is stable.
+  const outcomes = await Promise.all(adapters.map((adapter) => runAdapterSafely(adapter)));
+
+  for (const outcome of outcomes) {
+    if (!outcome.ok) {
+      // adapter.run() rejected instead of resolving with errors populated —
+      // report it as a fully failed source, same shape as any other adapter
+      // error, and continue with the remaining adapters.
       sources.push({
-        sourceName: adapter.sourceName,
+        sourceName: outcome.sourceName,
         fetched: 0,
         keptAfterFilter: 0,
         inserted: 0,
         updated: 0,
         failed: 0,
-        errors: [error instanceof Error ? error.message : String(error)],
+        errors: [outcome.message],
       });
       continue;
     }
+
+    const runResult = outcome.result;
 
     if (runResult.listings.length === 0) {
       sources.push({

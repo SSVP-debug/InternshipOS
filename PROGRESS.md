@@ -1,5 +1,31 @@
 # InternshipOS — Progress
 
+## 2026-11-03 — More ingestion sources + real pagination
+
+**What changed.** Ingestion went from 2 sources to 6, and Adzuna no longer
+stops at 100 results.
+
+- New adapters: `remotive`, and the public job-board APIs of `greenhouse`,
+  `lever` and `ashby` (company list in `api/config/ats-boards.json`).
+  Shared plumbing in `adapters/adapterCommon.ts` (retry/backoff that never
+  retries a 404, bounded per-board concurrency, validated board config,
+  one listing builder so every eligibility column is explicitly null).
+- Adzuna: pages until a short page (the real end of results) instead of a
+  fixed 2 pages; `ADZUNA_MAX_PAGES` (default 10, max 40) bounds it, and the
+  run reports when the ceiling cut results off.
+- `runIngestion` fetches all sources concurrently (writes still sequential,
+  summary order stable, a rejecting adapter still isolated).
+- Docs: `docs/ingestion-sources.md`.
+
+**Not changed.** `matchEngine.ts`, `skillNormalization.ts`,
+`dedupFingerprint.ts`, `expireStaleOpportunities.ts`, `writeOpportunitySource.ts`,
+every migration, and the web app.
+
+**Not verified.** The new adapters have not been run against the live Remotive /
+Greenhouse / Lever / Ashby services (development sandbox could not reach them);
+parsing is tested against fixtures built from each vendor's documented shape.
+Follow the "First live run checklist" in `docs/ingestion-sources.md`.
+
 ## 2026-09-19 — CORRECTION: Gate R8's Lever submission was built on a false premise
 
 This is a correction to the 2026-09-15 and 2026-09-17 entries below, not

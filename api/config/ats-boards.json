@@ -1,0 +1,16 @@
+{
+  "greenhouse": [
+    { "slug": "stripe", "company": "Stripe" },
+    { "slug": "airbnb", "company": "Airbnb" },
+    { "slug": "figma", "company": "Figma" },
+    { "slug": "gitlab", "company": "GitLab" }
+  ],
+  "lever": [
+    { "slug": "spotify", "company": "Spotify" },
+    { "slug": "palantir", "company": "Palantir" }
+  ],
+  "ashby": [
+    { "slug": "ramp", "company": "Ramp" },
+    { "slug": "linear", "company": "Linear" }
+  ]
+}
