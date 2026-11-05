@@ -1,10 +1,13 @@
 // ingest.ts
 // Run with: npm run ingest
 //
-// WHAT THIS DOES: fetches internship postings from the two configured
-// source adapters (Adzuna — India-first, RemoteOK — international/
-// remote), normalizes and filters them, and upserts them into
-// public.opportunity_source. Standalone operator script, same pattern
+// WHAT THIS DOES: fetches internship postings from every configured
+// source adapter — Adzuna (India-first), RemoteOK and Remotive
+// (remote), and the public job boards of the companies listed in
+// api/config/ats-boards.json on Greenhouse, Lever and Ashby (see
+// docs/ingestion-sources.md) — normalizes and filters them, and upserts
+// them into public.opportunity_source. All sources are fetched
+// concurrently; writes happen one source at a time. Standalone operator script, same pattern
 // as api/scripts/check-orphan-claims.ts — not a request-serving code
 // path, run manually (or later from a scheduler, not built yet).
 //
@@ -21,8 +24,10 @@
 //   npm run ingest
 //
 // If ADZUNA_APP_ID/ADZUNA_APP_KEY are unset, the Adzuna source is
-// skipped (reported in the summary, not a hard failure) — RemoteOK
-// needs no credentials and still runs. Exits 1 only if every configured
+// skipped (reported in the summary, not a hard failure) — every other
+// source needs no credentials and still runs. Optional:
+// ADZUNA_MAX_PAGES (default 10) and ATS_BOARDS_FILE (default
+// config/ats-boards.json, relative to the api/ directory). Exits 1 only if every configured
 // source failed outright (fetched: 0 and errors present for all of
 // them); a partial run (one source down, one source fine) exits 0 so
 // it's safe to run unattended without over-alerting.

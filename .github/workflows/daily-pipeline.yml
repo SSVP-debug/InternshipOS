@@ -22,6 +22,7 @@ name: Daily Opportunity Pipeline
 #     TELEGRAM_CHAT_ID          = <optional; one private chat>
 #     TELEGRAM_CANDIDATE_ID     = <optional; public.candidate.id UUID>
 #   Optional repository variables (Settings -> Secrets and variables -> Actions -> Variables):
+#     ADZUNA_MAX_PAGES          = 10 by default (pages of 50 results per run, max 40)
 #     TELEGRAM_MIN_MATCH_SCORE  = 60 by default
 #     TELEGRAM_LOOKBACK_HOURS   = 36 by default
 #     TELEGRAM_MAX_MATCHES      = 5 by default
@@ -184,6 +185,7 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           ADZUNA_APP_ID: ${{ secrets.ADZUNA_APP_ID }}
           ADZUNA_APP_KEY: ${{ secrets.ADZUNA_APP_KEY }}
+          ADZUNA_MAX_PAGES: ${{ vars.ADZUNA_MAX_PAGES }}
         run: npm run ingest
 
       # Matching runs second, only if ingestion did not fail outright

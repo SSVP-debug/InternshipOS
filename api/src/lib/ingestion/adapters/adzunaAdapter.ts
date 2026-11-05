@@ -55,7 +55,14 @@ const COUNTRY = "in";
 // (see the module header's eligibility-fields note).
 const JURISDICTION_COUNTRY_CODE = "IN";
 const RESULTS_PER_PAGE = 50;
-const PAGES_PER_RUN = 2; // keep the MVP's per-run volume small and predictable
+// Paging: the original MVP read only 2 pages (≤100 results) per run, which
+// silently dropped every internship beyond that. Paging now continues until
+// Adzuna returns a short page (the real end of the results), bounded by a
+// safety ceiling so a misbehaving response can never loop forever.
+// ADZUNA_MAX_PAGES overrides the default (clamped to 1..MAX_PAGES_CEILING).
+const DEFAULT_MAX_PAGES = 10; // up to 500 results per run
+const MAX_PAGES_CEILING = 40;
+const PAGE_DELAY_MS = 250; // small pause between pages — Adzuna's free tier is rate limited
 const MAX_RETRIES = 3;
 const RETRY_BASE_DELAY_MS = 500;
 const FETCH_TIMEOUT_MS = 10_000;
@@ -249,6 +256,16 @@ export function parseAdzunaListings(raw: unknown): { listings: CanonicalListing[
 }
 
 /**
+ * Reads ADZUNA_MAX_PAGES from env: a positive integer, clamped to
+ * MAX_PAGES_CEILING. Unset, empty, or unparseable → DEFAULT_MAX_PAGES.
+ */
+export function readMaxPages(env: NodeJS.ProcessEnv): number {
+  const parsed = Number.parseInt(env.ADZUNA_MAX_PAGES ?? "", 10);
+  if (!Number.isFinite(parsed) || parsed < 1) return DEFAULT_MAX_PAGES;
+  return Math.min(parsed, MAX_PAGES_CEILING);
+}
+
+/**
  * Reads ADZUNA_APP_ID / ADZUNA_APP_KEY from the given env source
  * (defaults to process.env). Returns null (not a throw) when either is
  * missing, so the orchestrator can skip this source with a clear error
@@ -275,16 +292,23 @@ export function createAdzunaAdapter(env: NodeJS.ProcessEnv = process.env): Sourc
 
       let totalFetched = 0;
       const allListings: CanonicalListing[] = [];
+      const maxPages = readMaxPages(env);
 
-      for (let page = 1; page <= PAGES_PER_RUN; page++) {
+      for (let page = 1; page <= maxPages; page++) {
+        if (page > 1) await new Promise((resolve) => setTimeout(resolve, PAGE_DELAY_MS));
         try {
           const raw = await fetchWithRetry(buildSearchUrl(page, credentials), credentials);
           const { listings, fetched } = parseAdzunaListings(raw);
           totalFetched += fetched;
           allListings.push(...listings);
           // Adzuna returns fewer than a full page on the last page —
-          // stop paging early instead of always making PAGES_PER_RUN calls.
+          // stop paging there: that is the end of the results.
           if (fetched < RESULTS_PER_PAGE) break;
+          if (page === maxPages) {
+            errors.push(
+              `reached the ${maxPages}-page limit with a full last page — more results may exist; raise ADZUNA_MAX_PAGES (max ${MAX_PAGES_CEILING}) to read further`
+            );
+          }
         } catch (error) {
           errors.push(`page ${page}: ${error instanceof Error ? error.message : String(error)}`);
           break; // don't keep paging past a failed page
