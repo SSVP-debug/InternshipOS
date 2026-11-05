@@ -1,3 +1,4 @@
+import path from "node:path";
 import { describe, it, expect, vi } from "vitest";
 import {
   HttpStatusError,
@@ -157,7 +158,8 @@ describe("loadAtsBoardsConfig", () => {
     const result = await loadAtsBoardsConfig({ ATS_BOARDS_FILE: "/tmp/none.json" } as NodeJS.ProcessEnv, readFileImpl);
     expect(result.config.greenhouse).toEqual([]);
     expect(result.warnings[0]).toMatch(/file not found/);
-    expect(result.filePath).toBe("/tmp/none.json");
+    // path.resolve on both sides: on Windows "/tmp/none.json" resolves to "C:\\tmp\\none.json".
+    expect(result.filePath).toBe(path.resolve("/tmp/none.json"));
   });
 
   it("returns an empty config plus a warning for invalid JSON instead of throwing", async () => {
@@ -169,7 +171,7 @@ describe("loadAtsBoardsConfig", () => {
   it("parses a valid file and honors ATS_BOARDS_FILE", async () => {
     const readFileImpl = vi.fn(async () => JSON.stringify({ ashby: ["ramp"] }));
     const result = await loadAtsBoardsConfig({ ATS_BOARDS_FILE: "/tmp/boards.json" } as NodeJS.ProcessEnv, readFileImpl);
-    expect(readFileImpl).toHaveBeenCalledWith("/tmp/boards.json", "utf8");
+    expect(readFileImpl).toHaveBeenCalledWith(path.resolve("/tmp/boards.json"), "utf8");
     expect(result.config.ashby).toEqual([{ slug: "ramp", company: "Ramp" }]);
   });
 });
