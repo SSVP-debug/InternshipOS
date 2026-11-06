@@ -67,28 +67,28 @@ export async function writeOpportunitySource(
       applicationUrl: coerceToWellFormedUrl(listing.application_url),
     });
 
-    return ({
-    source_type: listing.source_type,
-    source_name: listing.source_name,
-    source_ref: listing.source_ref,
-    source_url: coerceToWellFormedUrl(listing.source_url),
-    title: listing.title,
-    company: listing.company,
-    description: listing.description,
-    location: listing.location,
-    work_mode: listing.work_mode,
-    employment_type: listing.employment_type,
-    skills: listing.skills,
-    application_url: coerceToWellFormedUrl(listing.application_url),
-    deadline_date: listing.deadline_date,
-    posted_date: listing.posted_date,
-    dedup_fingerprint: computeDedupFingerprint(listing.source_name, listing.source_ref),
-    last_seen_at: new Date().toISOString(),
-    status: "active" as const,
-    quality_status: quality.quality_status,
-    quality_score: quality.quality_score,
-    quality_flags: quality.quality_flags,
-  });
+    return {
+      source_type: listing.source_type,
+      source_name: listing.source_name,
+      source_ref: listing.source_ref,
+      source_url: coerceToWellFormedUrl(listing.source_url),
+      title: listing.title,
+      company: listing.company,
+      description: listing.description,
+      location: listing.location,
+      work_mode: listing.work_mode,
+      employment_type: listing.employment_type,
+      skills: listing.skills,
+      application_url: coerceToWellFormedUrl(listing.application_url),
+      deadline_date: listing.deadline_date,
+      posted_date: listing.posted_date,
+      dedup_fingerprint: computeDedupFingerprint(listing.source_name, listing.source_ref),
+      last_seen_at: new Date().toISOString(),
+      status: "active" as const,
+      quality_status: quality.quality_status,
+      quality_score: quality.quality_score,
+      quality_flags: quality.quality_flags,
+    };
   });
 
   for (const batch of chunk(rows, UPSERT_BATCH_SIZE)) {
