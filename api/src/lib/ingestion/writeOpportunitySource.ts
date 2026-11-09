@@ -33,6 +33,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { computeDedupFingerprint } from "./dedupFingerprint.js";
 import { coerceToWellFormedUrl } from "./urlValidation.js";
+import { assessOpportunityQuality } from "./assessOpportunityQuality.js";
 import type { CanonicalListing, WriteSummary } from "./types.js";
 
 // Supabase JS upsert() does one round trip per call but batches rows
@@ -57,25 +58,38 @@ export async function writeOpportunitySource(
   let updated = 0;
   let failed = 0;
 
-  const rows = listings.map((listing) => ({
-    source_type: listing.source_type,
-    source_name: listing.source_name,
-    source_ref: listing.source_ref,
-    source_url: coerceToWellFormedUrl(listing.source_url),
-    title: listing.title,
-    company: listing.company,
-    description: listing.description,
-    location: listing.location,
-    work_mode: listing.work_mode,
-    employment_type: listing.employment_type,
-    skills: listing.skills,
-    application_url: coerceToWellFormedUrl(listing.application_url),
-    deadline_date: listing.deadline_date,
-    posted_date: listing.posted_date,
-    dedup_fingerprint: computeDedupFingerprint(listing.source_name, listing.source_ref),
-    last_seen_at: new Date().toISOString(),
-    status: "active" as const,
-  }));
+  const rows = listings.map((listing) => {
+    const quality = assessOpportunityQuality({
+      title: listing.title,
+      company: listing.company,
+      description: listing.description,
+      sourceUrl: coerceToWellFormedUrl(listing.source_url),
+      applicationUrl: coerceToWellFormedUrl(listing.application_url),
+    });
+
+    return {
+      source_type: listing.source_type,
+      source_name: listing.source_name,
+      source_ref: listing.source_ref,
+      source_url: coerceToWellFormedUrl(listing.source_url),
+      title: listing.title,
+      company: listing.company,
+      description: listing.description,
+      location: listing.location,
+      work_mode: listing.work_mode,
+      employment_type: listing.employment_type,
+      skills: listing.skills,
+      application_url: coerceToWellFormedUrl(listing.application_url),
+      deadline_date: listing.deadline_date,
+      posted_date: listing.posted_date,
+      dedup_fingerprint: computeDedupFingerprint(listing.source_name, listing.source_ref),
+      last_seen_at: new Date().toISOString(),
+      status: "active" as const,
+      quality_status: quality.quality_status,
+      quality_score: quality.quality_score,
+      quality_flags: quality.quality_flags,
+    };
+  });
 
   for (const batch of chunk(rows, UPSERT_BATCH_SIZE)) {
     // Read existing fingerprints first so insert/update can be reported
